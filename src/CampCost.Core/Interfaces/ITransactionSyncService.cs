@@ -9,6 +9,13 @@ public interface ITransactionSyncService
     /// <summary>Sync all Plaid connections for a specific user.</summary>
     Task<SyncResult> SyncForUserAsync(Guid userId);
 
+    /// <summary>
+    /// Sync transactions for one specific trip. Uses the trip's own date range as
+    /// the Plaid window and assigns all matching transactions directly to that trip,
+    /// reassigning any that were previously routed to a different trip.
+    /// </summary>
+    Task<SyncResult> SyncForTripAsync(Guid userId, Guid tripId);
+
     /// <summary>Sync all Plaid connections across all users (used by webhook).</summary>
     Task<SyncResult> SyncAllAsync();
 }

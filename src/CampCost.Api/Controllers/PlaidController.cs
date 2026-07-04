@@ -77,11 +77,15 @@ public class PlaidController : ControllerBase
     }
 
     // POST /api/plaid/sync
-    // Manually pulls new transactions for the current user and assigns them to trips
+    // Without trip_id: assigns transactions to whichever active trip matches the date.
+    // With trip_id: fetches exactly that trip's date range and routes everything to
+    // that trip, correcting any wrong-trip assignments from previous syncs.
     [HttpPost("sync")]
-    public async Task<IActionResult> Sync()
+    public async Task<IActionResult> Sync([FromQuery(Name = "trip_id")] Guid? tripId)
     {
-        var result = await _sync.SyncForUserAsync(UserId);
+        var result = tripId.HasValue
+            ? await _sync.SyncForTripAsync(UserId, tripId.Value)
+            : await _sync.SyncForUserAsync(UserId);
         return Ok(result);
     }
 

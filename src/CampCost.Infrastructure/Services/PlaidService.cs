@@ -58,7 +58,8 @@ public class PlaidService : IPlaidService
             t.OriginalDescription ?? t.MerchantName ?? "",
             t.MerchantName,
             t.Amount ?? 0m,
-            t.Date ?? startDate
+            t.Date ?? startDate,
+            t.Pending ?? false
         )).ToList();
     }
 }

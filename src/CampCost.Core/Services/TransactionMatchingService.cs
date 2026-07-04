@@ -7,8 +7,7 @@ namespace CampCost.Core.Services;
 ///
 ///   1. Date window match — tx date within [start - BUFFER_DAYS, min(end + BUFFER_DAYS, today)]
 ///   2. Fallback to a trip with no start_date set (catch-all trip)
-///   3. Fallback to trips[0] (first trip in the list)
-///   4. null if no trips at all
+///   3. null — unmatched transactions are skipped, not randomly assigned
 ///
 /// The today cap prevents future-dated buffer windows from matching past transactions.
 /// </summary>
@@ -51,7 +50,7 @@ public class TransactionMatchingService
         var noDateTrip = tripList.FirstOrDefault(t => t.StartDate is null);
         if (noDateTrip is not null) return noDateTrip;
 
-        // 3. Last resort — first trip in the list
-        return tripList[0];
+        // 3. No match — return null so the caller skips this transaction
+        return null;
     }
 }

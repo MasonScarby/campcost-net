@@ -18,5 +18,6 @@ public record PlaidTransaction(
     string Name,
     string? MerchantName,
     decimal Amount,
-    DateOnly Date
+    DateOnly Date,
+    bool Pending
 );
