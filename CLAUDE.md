@@ -45,6 +45,20 @@ Preferred, not strict law — don't block future refactors over layering purity.
 | ⚠️ Open | No active trips = silent black hole — needs warning in SyncResult |
 | ⚠️ Low | Timezone drift — 2-day buffer mostly covers it |
 
+## Security & Correctness Issues (Fix Before Go-Live)
+
+| Priority | Issue | File | Fix |
+|---|---|---|---|
+| CRITICAL | Webhook has no Plaid signature validation — anyone can POST and trigger a sync | `PlaidController.cs:96` | Validate `Plaid-Verification` header before processing |
+| CRITICAL | Webhook falls back to `SyncAllAsync()` if item_id lookup fails — syncs ALL users | `PlaidController.cs:114` | Return `Ok()` early if connection not found |
+| ✅ Resolved | CORS hardcoded to localhost — now driven by `Cors:AllowedOrigins` config. Production: set `Cors__AllowedOrigins__0=https://your-app.vercel.app` | `Program.cs` | |
+| HIGH | `ExchangeToken` missing `UserId` filter — could overwrite another user's connection | `PlaidController.cs:54` | Add `&& c.UserId == UserId` to query |
+| HIGH | Null `TransactionId` fallback generates random GUID — breaks dedup permanently | `PlaidService.cs:57` | Skip or throw, never generate random ID |
+| MED | No logging in sync services — can't debug production failures | `TransactionSyncService.cs` | Add structured logging at sync start/end |
+| MED | No pagination on Plaid `/transactions/get` — truncates at 500 transactions | `PlaidService.cs` | Loop until all pages fetched |
+| LOW | `BufferDays`/`MaxDays` defined as local constants in two places | `TransactionSyncService.cs` | Promote to class-level constants |
+| LOW | `ExchangeRequest`/`WebhookPayload` records defined inside controller file | `PlaidController.cs` | Move to `Contracts/` folder |
+
 ## Engineering Notes (Deep Context)
 
 ### Pending → Settled Duplicate Problem
