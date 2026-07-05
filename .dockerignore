@@ -1,0 +1,19 @@
+# Frontend — not needed in the .NET API Docker image
+client/
+
+# .NET build artifacts
+**/bin/
+**/obj/
+
+# Secrets
+.env
+**/secrets.json
+
+# Git / IDE
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# macOS
+.DS_Store
