@@ -249,7 +249,7 @@ See `CLAUDE.md` for the full list. Critical items:
 
 1. **Webhook signature not validated** — anyone can POST to the webhook endpoint and trigger a sync
 2. **Webhook SyncAllAsync fallback** — if item_id lookup fails, all users get synced
-3. ~~**CORS hardcoded to localhost**~~ — fixed; set `Cors__AllowedOrigins__0=https://your-app.vercel.app` in production
+3. ~~**CORS hardcoded to localhost**~~ — fixed; set `Cors__AllowedOrigins__0=https://your-frontend-url` in production env vars
 4. **ExchangeToken missing UserId filter** — connection lookup doesn't scope to current user
 5. **Null TransactionId generates random GUID** — breaks dedup
 

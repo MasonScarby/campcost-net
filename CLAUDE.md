@@ -51,7 +51,7 @@ Preferred, not strict law — don't block future refactors over layering purity.
 |---|---|---|---|
 | CRITICAL | Webhook has no Plaid signature validation — anyone can POST and trigger a sync | `PlaidController.cs:96` | Validate `Plaid-Verification` header before processing |
 | CRITICAL | Webhook falls back to `SyncAllAsync()` if item_id lookup fails — syncs ALL users | `PlaidController.cs:114` | Return `Ok()` early if connection not found |
-| ✅ Resolved | CORS hardcoded to localhost — now driven by `Cors:AllowedOrigins` config. Production: set `Cors__AllowedOrigins__0=https://your-app.vercel.app` | `Program.cs` | |
+| ✅ Resolved | CORS hardcoded to localhost — now driven by `Cors:AllowedOrigins` config. Production: set `Cors__AllowedOrigins__0=https://your-frontend-url` | `Program.cs` | |
 | HIGH | `ExchangeToken` missing `UserId` filter — could overwrite another user's connection | `PlaidController.cs:54` | Add `&& c.UserId == UserId` to query |
 | HIGH | Null `TransactionId` fallback generates random GUID — breaks dedup permanently | `PlaidService.cs:57` | Skip or throw, never generate random ID |
 | MED | No logging in sync services — can't debug production failures | `TransactionSyncService.cs` | Add structured logging at sync start/end |

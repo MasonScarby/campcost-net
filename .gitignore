@@ -14,6 +14,12 @@ appsettings.Development.json
 *.user
 *.suo
 
+# Client (React/Vite)
+client/node_modules/
+client/dist/
+client/.env
+client/.env.local
+
 # macOS
 .DS_Store
 
