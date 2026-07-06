@@ -50,8 +50,10 @@ public class PlaidController : ControllerBase
 
         var (accessToken, itemId) = await _plaid.ExchangePublicTokenAsync(req.PublicToken);
 
+        // UserId filter is security-critical: without it, one user re-linking an item_id
+        // that belongs to another user would overwrite that user's connection.
         var existing = await _db.PlaidConnections
-            .FirstOrDefaultAsync(c => c.ItemId == itemId);
+            .FirstOrDefaultAsync(c => c.ItemId == itemId && c.UserId == UserId);
 
         if (existing is not null)
         {
@@ -99,19 +101,18 @@ public class PlaidController : ControllerBase
         if (payload?.WebhookType != "TRANSACTIONS")
             return Ok(new { received = true });
 
-        if (payload.ItemId is not null)
-        {
-            var connection = await _db.PlaidConnections
-                .FirstOrDefaultAsync(c => c.ItemId == payload.ItemId);
+        // Unknown or missing item_id → acknowledge and do nothing. This endpoint is
+        // unauthenticated; it must NEVER fall back to syncing all users.
+        if (payload.ItemId is null)
+            return Ok(new { received = true });
 
-            if (connection is not null)
-            {
-                await _sync.SyncForUserAsync(connection.UserId);
-                return Ok(new { received = true });
-            }
-        }
+        var connection = await _db.PlaidConnections
+            .FirstOrDefaultAsync(c => c.ItemId == payload.ItemId);
 
-        await _sync.SyncAllAsync();
+        if (connection is null)
+            return Ok(new { received = true });
+
+        await _sync.SyncForUserAsync(connection.UserId);
         return Ok(new { received = true });
     }
 }
