@@ -23,12 +23,16 @@ public interface ITransactionSyncService
 /// <summary>
 /// Summary of what happened during a sync run.
 /// `synced` matches the original Node backend response shape: number of new expenses inserted.
+/// ExpensesRemoved = soft-deleted because Plaid reported the transaction as removed.
+/// Warning is non-null when the sync could not fully run (e.g. no active trips to match against).
 /// </summary>
 public record SyncResult(
     int ConnectionsProcessed,
     int TransactionsFetched,
     int ExpensesUpserted,
-    int ExpensesSkipped
+    int ExpensesSkipped,
+    int ExpensesRemoved = 0,
+    string? Warning = null
 )
 {
     /// <summary>Alias for ExpensesUpserted — matches original { synced: N } response the frontend reads.</summary>

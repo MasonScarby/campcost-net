@@ -20,6 +20,13 @@ public class Expense
     public bool Reviewed { get; set; } = false;
     public DateTime CreatedAt { get; set; }
 
+    /// <summary>
+    /// Soft-delete marker — set when Plaid reports the transaction as removed.
+    /// Financial history is never hard-deleted. A global query filter excludes
+    /// soft-deleted rows from all queries unless IgnoreQueryFilters() is used.
+    /// </summary>
+    public DateTime? DeletedAt { get; set; }
+
     // Navigation
     public Trip? Trip { get; set; }
 }

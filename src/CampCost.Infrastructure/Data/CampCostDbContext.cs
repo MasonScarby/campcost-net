@@ -57,6 +57,12 @@ public class CampCostDbContext : DbContext
             e.Property(x => x.Source).HasColumnName("source");
             e.Property(x => x.Reviewed).HasColumnName("reviewed");
             e.Property(x => x.CreatedAt).HasColumnName("created_at");
+            e.Property(x => x.DeletedAt).HasColumnName("deleted_at");
+
+            // Soft-deleted expenses (Plaid `removed` deltas) are hidden everywhere by
+            // default — budgets, trip views, etc. Sync code uses IgnoreQueryFilters()
+            // for dedup lookups so a removed transaction is never re-imported.
+            e.HasQueryFilter(x => x.DeletedAt == null);
 
             // Per-user unique: same Plaid tx can't appear twice for the same user.
             // Global uniqueness is NOT required (different users could theoretically share
@@ -76,6 +82,7 @@ public class CampCostDbContext : DbContext
             e.Property(p => p.ItemId).HasColumnName("item_id");
             e.Property(p => p.InstitutionName).HasColumnName("institution_name");
             e.Property(p => p.LastSyncAt).HasColumnName("last_sync_at");
+            e.Property(p => p.SyncCursor).HasColumnName("sync_cursor");
             e.Property(p => p.CreatedAt).HasColumnName("created_at");
         });
 

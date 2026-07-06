@@ -3,26 +3,57 @@ using CampCost.Core.Interfaces;
 using CampCost.Core.Services;
 using CampCost.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CampCost.Infrastructure.Services;
 
+/// <summary>
+/// Cursor-based ingestion via Plaid /transactions/sync.
+///
+/// Delta handling:
+///   added    → insert (dedup on plaid_transaction_id). If the added transaction carries a
+///              pending_transaction_id that matches an expense we already imported while it
+///              was pending, the existing row is updated in place — the Plaid ID is swapped
+///              to the settled ID so a pending and its settled version never coexist.
+///   modified → update the existing row in place (amount/date/merchant corrections).
+///   removed  → soft-delete (DeletedAt) — financial history is never hard-deleted.
+///
+/// Pending transactions ARE imported (the old skip-all-pending workaround is gone):
+/// /transactions/sync reconciles the pending→settled ID swap natively via the
+/// added + removed pair, so both versions can never be present at once.
+///
+/// The cursor is persisted on the connection in the same SaveChanges as the applied
+/// deltas. If no active trips exist for a user, the sync is skipped WITHOUT advancing
+/// the cursor (advancing it would permanently drop those deltas) and a warning is
+/// returned in SyncResult.
+/// </summary>
 public class TransactionSyncService : ITransactionSyncService
 {
+    private const int BufferDays = 2;
+    private const int MaxDays = 90;
+
+    public const string NoActiveTripsWarning =
+        "No active or planning trips to match transactions against — sync was skipped so no " +
+        "transactions are lost. Create or activate a trip, then sync again.";
+
     private readonly CampCostDbContext _db;
     private readonly IPlaidService _plaid;
     private readonly TransactionCategorizationService _categorizer;
     private readonly TransactionMatchingService _matcher;
+    private readonly ILogger<TransactionSyncService> _logger;
 
     public TransactionSyncService(
         CampCostDbContext db,
         IPlaidService plaid,
         TransactionCategorizationService categorizer,
-        TransactionMatchingService matcher)
+        TransactionMatchingService matcher,
+        ILogger<TransactionSyncService> logger)
     {
         _db = db;
         _plaid = plaid;
         _categorizer = categorizer;
         _matcher = matcher;
+        _logger = logger;
     }
 
     public async Task<SyncResult> SyncForUserAsync(Guid userId)
@@ -30,15 +61,20 @@ public class TransactionSyncService : ITransactionSyncService
         var connections = await _db.PlaidConnections
             .Where(c => c.UserId == userId)
             .ToListAsync();
-        return await SyncConnections(connections);
+        return await SyncConnectionsAsync(connections);
+    }
+
+    public async Task<SyncResult> SyncAllAsync()
+    {
+        var connections = await _db.PlaidConnections.ToListAsync();
+        return await SyncConnectionsAsync(connections);
     }
 
     /// <summary>
-    /// Trip-specific sync: fetches Plaid transactions covering exactly this trip's
-    /// date range (start-2 to end+2, capped at today) and assigns them all to this trip.
-    /// Any transactions already in the DB that are currently on a *different* trip but
-    /// fall within this trip's window are reassigned here — this corrects the common
-    /// "two overlapping trips, wrong trip got the transactions" problem.
+    /// Trip-specific sync: runs the normal cursor sync (new transactions inside this
+    /// trip's window are routed to this trip), then reassigns any existing Plaid
+    /// expenses that fall inside the trip's window but landed on a different trip —
+    /// corrects the "two overlapping trips, wrong trip got the transactions" problem.
     /// </summary>
     public async Task<SyncResult> SyncForTripAsync(Guid userId, Guid tripId)
     {
@@ -53,104 +89,62 @@ public class TransactionSyncService : ITransactionSyncService
 
         if (trip is null) return new SyncResult(0, 0, 0, 0);
 
-        const int BufferDays = 2;
-        const int MaxDays = 90;
+        // 1. Pull the latest deltas, routing new in-window transactions to this trip
+        var result = await SyncConnectionsAsync(connections, targetTrip: trip);
 
+        // 2. Reassign existing Plaid expenses inside this trip's window that are on another trip
+        var (windowStart, windowEnd) = GetTripWindow(trip);
+
+        var toReassign = await _db.Expenses
+            .Where(e => e.UserId == userId
+                        && e.TripId != tripId
+                        && e.PlaidTransactionId != null
+                        && e.Source == "plaid"
+                        && e.ExpenseDate >= windowStart
+                        && e.ExpenseDate <= windowEnd)
+            .ToListAsync();
+
+        foreach (var expense in toReassign)
+            expense.TripId = tripId;
+
+        if (toReassign.Count > 0)
+            await _db.SaveChangesAsync();
+
+        _logger.LogInformation(
+            "Trip sync for trip {TripId}: reassigned {Reassigned} existing expense(s) into window {Start}..{End}",
+            tripId, toReassign.Count, windowStart, windowEnd);
+
+        return result with { ExpensesUpserted = result.ExpensesUpserted + toReassign.Count };
+    }
+
+    private static (DateOnly Start, DateOnly End) GetTripWindow(Trip trip)
+    {
         var today = DateOnly.FromDateTime(DateTime.UtcNow);
 
-        var startDate = trip.StartDate.HasValue
+        var start = trip.StartDate.HasValue
             ? trip.StartDate.Value.AddDays(-BufferDays)
             : today.AddDays(-MaxDays);
 
-        // Never go further than 90 days back
         var hardLimit = today.AddDays(-MaxDays);
-        if (startDate < hardLimit) startDate = hardLimit;
+        if (start < hardLimit) start = hardLimit;
 
-        var endDate = trip.EndDate.HasValue
+        var end = trip.EndDate.HasValue
             ? (trip.EndDate.Value.AddDays(BufferDays) < today
                 ? trip.EndDate.Value.AddDays(BufferDays)
                 : today)
             : today;
 
-        int fetched = 0, upserted = 0, skipped = 0;
+        return (start, end);
+    }
 
-        // Map plaid_transaction_id → existing expense row so we can detect wrong-trip assignments
-        var existingByPlaidId = await _db.Expenses
-            .Where(e => e.UserId == userId && e.PlaidTransactionId != null)
-            .Select(e => new { e.Id, e.TripId, e.PlaidTransactionId })
-            .ToDictionaryAsync(e => e.PlaidTransactionId!, e => e);
+    private async Task<SyncResult> SyncConnectionsAsync(
+        List<PlaidConnection> connections, Trip? targetTrip = null)
+    {
+        int fetched = 0, upserted = 0, skipped = 0, removed = 0;
+        string? warning = null;
 
         foreach (var connection in connections)
         {
-            var transactions = await _plaid.GetTransactionsAsync(
-                connection.AccessToken, startDate, endDate);
-            fetched += transactions.Count;
-
-            foreach (var tx in transactions)
-            {
-                // Skip credits (money coming in)
-                if (tx.Amount < 0) { skipped++; continue; }
-
-                // Skip pending — wait for settlement so only the stable Plaid ID is stored
-                if (tx.Pending) { skipped++; continue; }
-
-                if (existingByPlaidId.TryGetValue(tx.TransactionId, out var existing))
-                {
-                    if (existing.TripId == tripId)
-                    {
-                        skipped++; // Already on the right trip
-                        continue;
-                    }
-
-                    // Transaction exists but landed on a different trip — reassign it here
-                    var row = await _db.Expenses.FindAsync(existing.Id);
-                    if (row is not null)
-                    {
-                        row.TripId = tripId;
-                        upserted++;
-                    }
-                    continue;
-                }
-
-                // Brand new transaction — create it on this trip
-                _db.Expenses.Add(new Expense
-                {
-                    Id = Guid.NewGuid(),
-                    UserId = userId,
-                    TripId = tripId,
-                    PlaidTransactionId = tx.TransactionId,
-                    MerchantName = tx.MerchantName,
-                    Amount = tx.Amount,
-                    Category = _categorizer.Categorize(tx.Name, tx.MerchantName),
-                    ExpenseDate = tx.Date,
-                    Source = "plaid",
-                    Reviewed = false,
-                    CreatedAt = DateTime.UtcNow
-                });
-                upserted++;
-            }
-
-            connection.LastSyncAt = DateTime.UtcNow;
-        }
-
-        await _db.SaveChangesAsync();
-        return new SyncResult(connections.Count, fetched, upserted, skipped);
-    }
-
-    public async Task<SyncResult> SyncAllAsync()
-    {
-        var connections = await _db.PlaidConnections.ToListAsync();
-        return await SyncConnections(connections);
-    }
-
-    private async Task<SyncResult> SyncConnections(List<PlaidConnection> connections)
-    {
-        int fetched = 0, upserted = 0, skipped = 0;
-
-        foreach (var connection in connections)
-        {
-            var endDate = DateOnly.FromDateTime(DateTime.UtcNow);
-
             // Only match against planning/active trips — same as original JS filter
             var trips = await _db.Trips
                 .Where(t => t.UserId == connection.UserId &&
@@ -158,56 +152,61 @@ public class TransactionSyncService : ITransactionSyncService
                 .OrderBy(t => t.StartDate)
                 .ToListAsync();
 
-            // Sync window: whichever is earliest of —
-            //   • lastSyncAt - 2 days  (incremental, catches late-posting transactions)
-            //   • earliest active trip start - 2 days  (ensures full trip is always covered)
-            // Hard cap at 90 days so we never request years of history.
-            // Dedup by plaid_transaction_id prevents re-inserting existing rows.
-            const int BufferDays = 2;
-            const int MaxDays = 90;
+            if (trips.Count == 0)
+            {
+                // Do NOT call Plaid / advance the cursor here: /transactions/sync only
+                // delivers each delta once per cursor position, so skipping transactions
+                // while advancing the cursor would drop them permanently.
+                _logger.LogWarning(
+                    "Sync skipped for connection {ConnectionId} (user {UserId}): no active trips to match against",
+                    connection.Id, connection.UserId);
+                warning = NoActiveTripsWarning;
+                continue;
+            }
 
-            var fromLastSync = connection.LastSyncAt.HasValue
-                ? DateOnly.FromDateTime(connection.LastSyncAt.Value.AddDays(-BufferDays))
-                : endDate.AddDays(-MaxDays);
+            _logger.LogInformation(
+                "Plaid sync start: connection {ConnectionId}, user {UserId}, first sync: {IsFirstSync}",
+                connection.Id, connection.UserId, connection.SyncCursor is null);
 
-            var earliestTripStart = trips
-                .Where(t => t.StartDate.HasValue)
-                .Select(t => t.StartDate!.Value.AddDays(-BufferDays))
-                .DefaultIfEmpty(fromLastSync)
-                .Min();
+            var delta = await _plaid.SyncTransactionsAsync(connection.AccessToken, connection.SyncCursor);
+            fetched += delta.Added.Count + delta.Modified.Count;
 
-            var hardLimit = endDate.AddDays(-MaxDays);
-            var startDate = earliestTripStart < fromLastSync ? earliestTripStart : fromLastSync;
-            if (startDate < hardLimit) startDate = hardLimit;
-
-            var transactions = await _plaid.GetTransactionsAsync(
-                connection.AccessToken, startDate, endDate);
-            fetched += transactions.Count;
-
-            var existingIds = (await _db.Expenses
+            // All existing Plaid-sourced expenses for this user, INCLUDING soft-deleted
+            // ones (IgnoreQueryFilters) so a removed transaction is never re-imported
+            // and modified/removed deltas can still find their row.
+            var existingByPlaidId = await _db.Expenses
+                .IgnoreQueryFilters()
                 .Where(e => e.UserId == connection.UserId && e.PlaidTransactionId != null)
-                .Select(e => e.PlaidTransactionId)
-                .ToListAsync()).ToHashSet();
+                .ToDictionaryAsync(e => e.PlaidTransactionId!);
 
-            foreach (var tx in transactions)
+            foreach (var tx in delta.Added)
             {
                 // Skip credits (money in) — Plaid: negative amount = credit
                 if (tx.Amount < 0) { skipped++; continue; }
 
-                // Skip pending transactions — Plaid assigns a temporary ID while pending
-                // and a new permanent ID once settled, causing duplicates if both are imported.
-                // Wait for settlement so only the stable ID ever enters the DB.
-                if (tx.Pending) { skipped++; continue; }
+                // Pending → settled: Plaid delivers the settled transaction as `added`
+                // with a NEW transaction_id and a pending_transaction_id pointing at the
+                // pending version. If we imported the pending version, update it in place
+                // (swap the Plaid ID) so pending + settled never coexist.
+                if (tx.PendingTransactionId is not null &&
+                    existingByPlaidId.TryGetValue(tx.PendingTransactionId, out var pendingRow))
+                {
+                    existingByPlaidId.Remove(tx.PendingTransactionId);
+                    ApplyTransaction(pendingRow, tx);
+                    existingByPlaidId[tx.TransactionId] = pendingRow;
+                    upserted++;
+                    continue;
+                }
 
-                // Deduplicate by plaid_transaction_id
-                if (existingIds.Contains(tx.TransactionId)) { skipped++; continue; }
+                // Dedup on plaid_transaction_id
+                if (existingByPlaidId.ContainsKey(tx.TransactionId)) { skipped++; continue; }
 
-                var matchedTrip = _matcher.FindMatchingTrip(tx.Date, trips);
+                var matchedTrip = MatchTrip(tx.Date, trips, targetTrip);
 
-                // No trip to assign to — skip (original JS: if (!tripMatch) continue)
+                // No trip to assign to — skip (trip_id is NOT NULL in the DB)
                 if (matchedTrip is null) { skipped++; continue; }
 
-                _db.Expenses.Add(new Expense
+                var expense = new Expense
                 {
                     Id = Guid.NewGuid(),
                     UserId = connection.UserId,
@@ -220,14 +219,96 @@ public class TransactionSyncService : ITransactionSyncService
                     Source = "plaid",
                     Reviewed = false,
                     CreatedAt = DateTime.UtcNow
-                });
+                };
+                _db.Expenses.Add(expense);
+                existingByPlaidId[tx.TransactionId] = expense;
                 upserted++;
             }
 
+            foreach (var tx in delta.Modified)
+            {
+                if (existingByPlaidId.TryGetValue(tx.TransactionId, out var row))
+                {
+                    // Update in place — never insert a second copy of the same Plaid ID
+                    ApplyTransaction(row, tx);
+                    upserted++;
+                    continue;
+                }
+
+                if (tx.Amount < 0) { skipped++; continue; }
+
+                // Modified delta for a transaction we never imported (e.g. it was pending
+                // and skipped under the old /transactions/get flow) — treat as added.
+                var matchedTrip = MatchTrip(tx.Date, trips, targetTrip);
+                if (matchedTrip is null) { skipped++; continue; }
+
+                var expense = new Expense
+                {
+                    Id = Guid.NewGuid(),
+                    UserId = connection.UserId,
+                    TripId = matchedTrip.Id,
+                    PlaidTransactionId = tx.TransactionId,
+                    MerchantName = tx.MerchantName,
+                    Amount = tx.Amount,
+                    Category = _categorizer.Categorize(tx.Name, tx.MerchantName),
+                    ExpenseDate = tx.Date,
+                    Source = "plaid",
+                    Reviewed = false,
+                    CreatedAt = DateTime.UtcNow
+                };
+                _db.Expenses.Add(expense);
+                existingByPlaidId[tx.TransactionId] = expense;
+                upserted++;
+            }
+
+            foreach (var plaidId in delta.RemovedTransactionIds)
+            {
+                // Soft-delete only — financial history is never hard-deleted.
+                // Note: when a pending transaction settles, its `removed` delta usually
+                // finds nothing here because the added-handler already swapped the row's
+                // Plaid ID to the settled ID.
+                if (existingByPlaidId.TryGetValue(plaidId, out var row) && row.DeletedAt is null)
+                {
+                    row.DeletedAt = DateTime.UtcNow;
+                    removed++;
+                }
+            }
+
+            // Persist the cursor in the same SaveChanges as the applied deltas —
+            // never advance it past deltas that were not stored.
+            connection.SyncCursor = delta.NextCursor;
             connection.LastSyncAt = DateTime.UtcNow;
+
+            _logger.LogInformation(
+                "Plaid sync end: connection {ConnectionId} — added {Added}, modified {Modified}, removed {Removed}",
+                connection.Id, delta.Added.Count, delta.Modified.Count, delta.RemovedTransactionIds.Count);
         }
 
         await _db.SaveChangesAsync();
-        return new SyncResult(connections.Count, fetched, upserted, skipped);
+        return new SyncResult(connections.Count, fetched, upserted, skipped, removed, warning);
+    }
+
+    /// <summary>
+    /// Trip routing: trip-specific syncs force in-window transactions onto the target
+    /// trip; everything else goes through the normal date-window matcher.
+    /// </summary>
+    private Trip? MatchTrip(DateOnly date, List<Trip> trips, Trip? targetTrip)
+    {
+        if (targetTrip is not null)
+        {
+            var (start, end) = GetTripWindow(targetTrip);
+            if (date >= start && date <= end) return targetTrip;
+        }
+        return _matcher.FindMatchingTrip(date, trips);
+    }
+
+    /// <summary>Update an existing expense from a Plaid delta — the pending→settled and `modified` path.</summary>
+    private void ApplyTransaction(Expense expense, PlaidTransaction tx)
+    {
+        expense.PlaidTransactionId = tx.TransactionId;
+        expense.MerchantName = tx.MerchantName;
+        expense.Amount = tx.Amount;
+        expense.ExpenseDate = tx.Date;
+        expense.Category = _categorizer.Categorize(tx.Name, tx.MerchantName);
     }
 }

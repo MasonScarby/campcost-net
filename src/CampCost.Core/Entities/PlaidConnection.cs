@@ -12,5 +12,13 @@ public class PlaidConnection
     public string ItemId { get; set; } = string.Empty;
     public string InstitutionName { get; set; } = string.Empty;
     public DateTime? LastSyncAt { get; set; }
+
+    /// <summary>
+    /// Plaid /transactions/sync cursor — position of the last successfully applied
+    /// delta set. Null means the connection has never synced (first sync pulls full
+    /// history). Only persist after deltas are applied, or updates would be lost.
+    /// </summary>
+    public string? SyncCursor { get; set; }
+
     public DateTime CreatedAt { get; set; }
 }

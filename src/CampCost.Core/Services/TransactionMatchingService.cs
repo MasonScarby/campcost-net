@@ -17,7 +17,9 @@ public class TransactionMatchingService
 
     public Trip? FindMatchingTrip(DateOnly transactionDate, IEnumerable<Trip> trips)
     {
-        var tripList = trips.ToList();
+        // Deterministic regardless of caller ordering: earliest StartDate wins when
+        // windows overlap (null StartDate sorts first but never matches the window step).
+        var tripList = trips.OrderBy(t => t.StartDate).ToList();
         if (tripList.Count == 0) return null;
 
         var today = DateOnly.FromDateTime(DateTime.UtcNow);
