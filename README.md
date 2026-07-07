@@ -1,272 +1,188 @@
 # CampCost
 
-Budget tracking for RV and camping trips. Connects to your bank via Plaid, automatically categorizes transactions (fuel, campground, food, gear, repairs, etc.), and shows you real-time trip budget summaries with burn rate and days-left estimates.
+CampCost is trip budget tracking for RV and truck-camper travelers. It connects to your bank via Plaid, pulls in transactions automatically, categorizes them by merchant (Shell → fuel, KOA → campground), and matches each one to the right trip by date — so mid-trip you can see money left, daily burn rate, and an estimate of how many more days you can stay on the road.
 
-## What It Does
-
-- Connect your bank account via Plaid Link
-- Sync transactions automatically or on-demand
-- Auto-categorize spending by merchant name (Shell → fuel, KOA → campground, etc.)
-- Track planned vs actual budget per trip and per category
-- Calculate daily burn rate and estimated days left on the road
-- Plan trip stops with locations and dates
+ASP.NET Core 8 backend, React frontend, Supabase Postgres, deployed on Railway + Vercel.
 
 ## Tech Stack
 
-| Layer | Technology |
-|---|---|
-| API | ASP.NET Core 8 |
-| Frontend | React + Vite |
-| Database | Supabase (PostgreSQL) |
-| Auth | Supabase JWT (RS256) |
-| Bank Integration | Plaid API |
-| ORM | Entity Framework Core + Npgsql |
+| Layer | Technology | Why |
+|---|---|---|
+| API | ASP.NET Core 8 (LTS) | Strong typing for financial code, first-class async, built-in DI and JWT middleware. Upgraded from .NET 7 to stay on an LTS release. |
+| Frontend | React 19 + Vite | Fast dev loop; the app is a small SPA (7 routes) so a full framework would be overkill. Tailwind 4 for styling, Recharts for budget charts, `react-plaid-link` for the bank-connection flow. |
+| Database | Supabase (PostgreSQL) | Real Postgres with row-level security for any direct client access, plus hosted auth — no separate identity provider to run. |
+| Auth | Supabase JWT (RS256) | The frontend signs in with Supabase; the API validates the same RS256 token against Supabase's JWKS endpoint. One identity system across both halves, no session state on the API. |
+| Bank data | Plaid (Going.Plaid SDK) | Industry-standard transaction aggregation with a free sandbox. The SDK is isolated behind an interface so Plaid types never leak past the Infrastructure layer. |
+| ORM | EF Core + Npgsql | Npgsql's enum mapping lets the C# code write directly to the `expense_category` Postgres enum instead of using text columns. |
+| Hosting | Railway (API, Docker) + Vercel (frontend) | Railway runs the multi-stage Dockerfile; Vercel serves the static Vite build. Both configure everything through env vars. |
 
 ## Architecture
 
-Clean Architecture — no reverse dependencies between layers.
+Clean Architecture with three projects and one dependency direction — inward:
 
-```
-CampCost.Core          → Entities, domain services, interfaces (no EF, no Plaid, no HTTP)
-CampCost.Infrastructure → EF Core DbContext, PlaidService, TransactionSyncService
-CampCost.Api           → Controllers, middleware (no business logic)
-```
-
-## Domain Model
-
-```
-Trip
- ├── TripStop[]       (planned route stops with arrival/departure dates)
- ├── Expense[]        (from Plaid sync or manual entry)
- └── BudgetCategory[] (planned spend per category)
+```mermaid
+graph TD
+    Api["CampCost.Api<br/>Controllers, JWT auth, CORS, error middleware<br/><i>no business logic</i>"]
+    Infra["CampCost.Infrastructure<br/>EF Core DbContext, PlaidService, TransactionSyncService<br/><i>all external I/O</i>"]
+    Core["CampCost.Core<br/>Entities, domain services, interfaces<br/><i>zero external dependencies</i>"]
+    Api --> Infra
+    Api --> Core
+    Infra --> Core
 ```
 
-**Trip statuses:** `planning` | `active` | `completed`
-Sync only runs against `planning` and `active` trips.
+- **Core** — entities (`Trip`, `Expense`, `PlaidConnection`, `BudgetCategory`, `TripStop`, `Subscription`), pure domain services (categorization, trip matching, budget math), and the `IPlaidService` / `ITransactionSyncService` interfaces. No EF Core, no Plaid, no HTTP. Every service here is unit-testable with plain objects — no mocks of infrastructure needed.
+- **Infrastructure** — implements Core's interfaces: `CampCostDbContext` (EF Core → Supabase Postgres), `PlaidService` (wraps the Going.Plaid SDK and converts its types to a small `PlaidTransaction` DTO), and `TransactionSyncService` (the sync orchestrator). A single `AddInfrastructure()` extension wires the whole layer, so the Api project never references EF Core or Plaid directly.
+- **Api** — two controllers (`TripController`, `PlaidController`), JWT bearer auth, config-driven CORS, and a global error-handling middleware. Controllers extract the user ID from the token, call a service, and return the result.
 
-## Expense Categories
+A deeper layer-by-layer walkthrough, including how a Plaid sync flows end to end, is in [docs/architecture.md](docs/architecture.md).
 
-Categories must match the `expense_category` PostgreSQL enum exactly:
+## Key Engineering Decisions
 
-| Value | Matches |
-|---|---|
-| `fuel` | Shell, BP, Chevron, Exxon, Pilot, Love's, Flying J, etc. |
-| `campground` | KOA, HipCamp, ReserveAmerica, RV parks, state park campsites |
-| `food_groceries` | Walmart, Kroger, Safeway, Aldi, Whole Foods, etc. |
-| `gear` | REI, Cabela's, Bass Pro, Backcountry, etc. |
-| `repairs` | AutoZone, O'Reilly, NAPA, mechanics, tire shops |
-| `propane_utilities` | AmeriGas, Ferrellgas, Blue Rhino, dump stations |
-| `activities` | National parks, entrance fees, recreation permits |
-| `misc` | Fallback for anything unmatched |
+**Pending vs settled transactions.** Plaid gives a pending transaction a temporary ID, then a *different* permanent ID once it settles. Importing both creates a duplicate expense that dedup can't catch. Current approach: skip pending transactions entirely and only import settled ones, so only stable IDs ever enter the database. The full fix — migrating from `/transactions/get` to `/transactions/sync`, which reports added/modified/removed deltas and handles the ID swap natively — is planned and tracked.
 
-## API Endpoints
+**Deduplication by `plaid_transaction_id`.** A unique index on `(user_id, plaid_transaction_id)` (filtered to non-null IDs) makes it impossible to import the same bank transaction twice, even if a sync runs redundantly. Sync windows deliberately overlap (`last_sync_at - 2 days`) to catch late-posting transactions; the index makes that overlap safe.
 
-All endpoints require a Supabase JWT Bearer token except the webhook.
+**Deterministic trip matching.** Transactions match a trip when their date falls inside `[start_date - 2 days, min(end_date + 2 days, today)]`. Candidate trips are ordered by `StartDate` before matching, so when two trips overlap, the earliest-starting trip always wins — the assignment is reproducible, not dependent on query row order. Transactions matching no trip are **skipped**, never dumped into an arbitrary trip. A trip-scoped sync (`POST /api/plaid/sync?trip_id=...`) can later pull them in and even reassign transactions that landed on the wrong trip.
 
-### Trips
+**Soft-delete only for financial history.** Expenses flagged during review are never hard-deleted. Skipped/removed items are recorded as `reviewed = true, adjusted_amount = 0, adjustment_note = 'skipped'`, so the audit trail of what the bank reported stays intact and budget totals remain explainable.
+
+**`decimal` for all money.** Every monetary value — amounts, budgets, burn rates — is C# `decimal` mapped to Postgres `numeric`. No floats anywhere near money.
+
+**Budget is always computed, never cached.** `BudgetCalculationService` recomputes planned budget, spend, burn rate, and days-left from source rows on every request. No stale cached totals to invalidate; if categories exist their planned amounts are summed, otherwise the trip's `total_budget` is the fallback.
+
+## API Surface
+
+All endpoints require a Supabase JWT Bearer token except the Plaid webhook.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/trips` | All planning/active trips for the current user, ordered by start date |
-| `GET` | `/api/trips/{id}/budget` | Budget summary: planned, spent, money left, daily burn rate, days left |
-| `GET` | `/api/trips/{id}/budget/by-category` | Planned vs actual broken down by expense category |
+| `GET` | `/api/trips` | Current user's trips, ordered by start date |
+| `GET` | `/api/trips/{id}/budget` | Planned budget, spent, money left, daily burn, days left |
+| `GET` | `/api/trips/{id}/budget/by-category` | Planned vs actual per expense category |
+| `POST` | `/api/plaid/link-token` | Create a Plaid Link token for the bank-connect UI |
+| `POST` | `/api/plaid/exchange-token` | Swap public token for access token (upsert on `item_id`) |
+| `POST` | `/api/plaid/sync` | Sync transactions; optional `?trip_id=` for trip-scoped sync |
+| `POST` | `/api/plaid/webhook` | Plaid push webhook (TRANSACTIONS events) |
 
-### Plaid
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/api/plaid/link-token` | Create a Plaid Link token for the frontend bank connection UI |
-| `POST` | `/api/plaid/exchange-token` | Swap public token for access token, upsert on item_id |
-| `POST` | `/api/plaid/sync` | Sync transactions. Optional `?trip_id=` to sync one specific trip |
-| `POST` | `/api/plaid/webhook` | Plaid push webhook — processes TRANSACTIONS events |
-
-### Health
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/` | Redirects to Swagger UI |
-
-## Transaction Sync Logic
-
-**First connection:** 90 days back
-**Incremental:** whichever is earlier — `lastSyncAt - 2 days` OR earliest active trip start date
-**Hard cap:** 90 days maximum
-
-**Dedup:** `plaid_transaction_id` unique index per user — same transaction can never be imported twice.
-
-**Pending transactions:** skipped entirely. Plaid assigns a temporary ID while pending and a different permanent ID once settled, which causes duplicates. Only settled transactions are imported.
-
-**Trip matching:** transactions are matched to trips by date window (`start_date - 2 days` to `end_date + 2 days`, capped at today). If no match → transaction is skipped, not randomly assigned. Overlapping trips resolve to the earliest start date.
-
-**Skipped transactions** are recorded as: `reviewed=true, adjusted_amount=0, adjustment_note='skipped'`
-
-## Budget Calculation
-
-```
-planned_budget = sum(budget_categories.planned_amount)  [if categories exist]
-               = trip.total_budget                       [fallback]
-
-money_left     = planned_budget - sum(expenses.amount)
-
-daily_burn     = total_spent / days_elapsed_since_start  (minimum 1 day)
-
-days_left      = money_left / daily_burn                 (null if no spending yet)
-```
-
-Budget is always recalculated from source data — never cached.
-
-## Database Schema
-
-### `trips`
-| Column | Type | Notes |
-|---|---|---|
-| id | uuid | PK |
-| user_id | uuid | FK to auth.users |
-| name | text | |
-| destination | text | nullable |
-| start_date | date | nullable |
-| end_date | date | nullable |
-| total_budget | numeric | fallback if no budget_categories |
-| status | text | planning \| active \| completed |
-| created_at | timestamptz | |
-
-### `expenses`
-| Column | Type | Notes |
-|---|---|---|
-| id | uuid | PK |
-| trip_id | uuid | FK to trips |
-| user_id | uuid | FK to auth.users |
-| plaid_transaction_id | text | UNIQUE per user, nullable |
-| merchant_name | text | nullable |
-| amount | numeric | always positive (credits skipped) |
-| category | expense_category | DB enum |
-| expense_date | date | |
-| source | text | plaid \| manual |
-| reviewed | boolean | |
-| created_at | timestamptz | |
-
-**Index:** `(user_id, plaid_transaction_id)` unique where `plaid_transaction_id IS NOT NULL`
-
-### `plaid_connections`
-| Column | Type | Notes |
-|---|---|---|
-| id | uuid | PK |
-| user_id | uuid | FK to auth.users |
-| access_token | text | Plaid permanent access token |
-| item_id | text | Plaid item identifier |
-| institution_name | text | |
-| last_sync_at | timestamptz | nullable — null = never synced |
-| created_at | timestamptz | |
-
-### `trip_stops`
-| Column | Type | Notes |
-|---|---|---|
-| id | uuid | PK |
-| trip_id | uuid | FK to trips |
-| location | text | |
-| arrival_date | date | nullable |
-| departure_date | date | nullable |
-| notes | text | nullable |
-| created_at | timestamptz | |
-
-### `budget_categories`
-| Column | Type | Notes |
-|---|---|---|
-| id | uuid | PK |
-| trip_id | uuid | FK to trips |
-| category | expense_category | DB enum |
-| planned_amount | numeric | |
-| created_at | timestamptz | |
-
-### `subscriptions`
-| Column | Type | Notes |
-|---|---|---|
-| id | uuid | PK |
-| user_id | uuid | FK to auth.users |
-| plan | text | |
-| status | text | |
-| created_at | timestamptz | |
+Swagger UI is served at `/swagger` with JWT Bearer support built in.
 
 ## Local Setup
 
 ### Prerequisites
+
 - .NET 8 SDK
-- Node.js (for frontend)
-- Supabase project with the schema above
-- Plaid developer account (sandbox is free)
+- Node.js 20+
+- A Supabase project (run `client/supabase/migrations/001_init.sql` in the SQL editor)
+- A Plaid developer account (sandbox is free)
 
 ### Backend
 
+Secrets are loaded via `dotnet user-secrets` locally — nothing sensitive lives in `appsettings.json` or the repo.
+
 ```bash
-cd CampCost.NET
 dotnet restore
 
-# Set secrets locally (never commit these)
-dotnet user-secrets set "ConnectionStrings:DefaultConnection" "your-supabase-connection-string"
-dotnet user-secrets set "Supabase:Url" "https://your-project.supabase.co"
-dotnet user-secrets set "Plaid:ClientId" "your-plaid-client-id"
-dotnet user-secrets set "Plaid:Secret" "your-plaid-secret"
+cd src/CampCost.Api
+dotnet user-secrets set "ConnectionStrings:DefaultConnection" "Host=db.<project-ref>.supabase.co;Database=postgres;Username=postgres;Password=<your-db-password>"
+dotnet user-secrets set "Supabase:Url" "https://<project-ref>.supabase.co"
+dotnet user-secrets set "Plaid:ClientId" "<your-plaid-client-id>"
+dotnet user-secrets set "Plaid:Secret" "<your-plaid-sandbox-secret>"
 dotnet user-secrets set "Plaid:Environment" "sandbox"
-dotnet user-secrets set "Plaid:WebhookUrl" "https://your-domain.com/api/plaid/webhook"
+dotnet user-secrets set "Plaid:WebhookUrl" "https://<your-public-url>/api/plaid/webhook"   # optional locally
 
+cd ../..
 dotnet run --project src/CampCost.Api
-# API runs at http://localhost:5033
-# Swagger UI at http://localhost:5033/swagger
+# API:     http://localhost:5033
+# Swagger: http://localhost:5033/swagger
 ```
+
+CORS defaults to `http://localhost:5173` / `5174` when `Cors:AllowedOrigins` is not configured, so the dev frontend works out of the box.
 
 ### Frontend
 
 ```bash
-cd Projects/campcost
+cd client
 npm install
+
+# .env.local (see client/.env.example for the full template)
+# VITE_SUPABASE_URL=https://<project-ref>.supabase.co
+# VITE_SUPABASE_ANON_KEY=<your-anon-key>
+# VITE_API_URL=http://localhost:5033
+
 npm run dev
-# Runs at http://localhost:5173
+# http://localhost:5173
 ```
 
-### Getting a JWT for Swagger Testing
+### Testing protected endpoints in Swagger
 
-In your browser console on the frontend:
+Grab a JWT from the browser console while logged in to the frontend:
+
 ```js
 (await supabase.auth.getSession()).data.session.access_token
 ```
-Paste into Swagger UI → Authorize.
 
-## Environment Variables (Production)
+Paste it into Swagger's **Authorize** dialog.
 
-| Variable | Description |
+### Tests
+
+```bash
+dotnet test
+```
+
+Unit tests cover the three Core domain services: budget calculation, merchant categorization, and trip matching (including overlapping-trip and buffer-window edge cases).
+
+## Deployment
+
+| Piece | Platform | How |
+|---|---|---|
+| API | Railway | Builds the multi-stage `Dockerfile` (SDK image → `dotnet publish` → slim ASP.NET runtime image, listening on `:8080`). |
+| Frontend | Vercel | Static Vite build from `client/`. |
+| Database | Supabase | Managed Postgres + auth; RLS policies protect direct client access. |
+
+Environment variables — **names only, set real values in each platform's dashboard**:
+
+**Railway (API):**
+
+| Variable | Purpose |
 |---|---|
-| `ConnectionStrings__DefaultConnection` | Supabase PostgreSQL connection string |
-| `Supabase__Url` | Supabase project URL |
+| `ConnectionStrings__DefaultConnection` | Supabase Postgres connection string |
+| `Supabase__Url` | Supabase project URL (JWT authority = `{url}/auth/v1`) |
 | `Plaid__ClientId` | Plaid client ID |
-| `Plaid__Secret` | Plaid secret key |
+| `Plaid__Secret` | Plaid secret for the active environment |
 | `Plaid__Environment` | `sandbox` \| `development` \| `production` |
-| `Plaid__WebhookUrl` | Public URL for Plaid to POST transaction events |
-| `Plaid__RedirectUri` | OAuth redirect URI (if using OAuth banks) |
+| `Plaid__WebhookUrl` | Public URL Plaid POSTs transaction events to |
+| `Plaid__RedirectUri` | OAuth redirect URI (only for OAuth-based banks) |
+| `Cors__AllowedOrigins__0` | Frontend origin, e.g. `https://<your-app>.vercel.app` |
+
+**Vercel (frontend):**
+
+| Variable | Purpose |
+|---|---|
+| `VITE_API_URL` | Railway API base URL |
+| `VITE_SUPABASE_URL` | Supabase project URL |
+| `VITE_SUPABASE_ANON_KEY` | Supabase anon (public) key |
 
 ## Known Issues Before Go-Live
 
-See `CLAUDE.md` for the full list. Critical items:
+Tracked in `CLAUDE.md` with file/line detail. The critical ones:
 
-1. **Webhook signature not validated** — anyone can POST to the webhook endpoint and trigger a sync
-2. **Webhook SyncAllAsync fallback** — if item_id lookup fails, all users get synced
-3. ~~**CORS hardcoded to localhost**~~ — fixed; set `Cors__AllowedOrigins__0=https://your-frontend-url` in production env vars
-4. **ExchangeToken missing UserId filter** — connection lookup doesn't scope to current user
-5. **Null TransactionId generates random GUID** — breaks dedup
+1. **Webhook signature not validated** — the Plaid webhook endpoint accepts any POST; the `Plaid-Verification` JWT header must be verified before production.
+2. **Webhook `SyncAllAsync` fallback** — an unknown `item_id` currently falls back to syncing every user; it should no-op instead.
+3. **`ExchangeToken` connection lookup not scoped to the current user.**
+4. **Null Plaid `TransactionId` falls back to a random GUID** in `PlaidService`, which would silently break dedup for that row.
+5. **No pagination on `/transactions/get`** — truncates past 500 transactions per window.
 
-## Changelog
+## Project Layout
 
-### 2026-07-05
-- Fixed `trips[0]` silent fallback — unmatched transactions now return null and are explicitly skipped
-- Added `OrderBy(StartDate)` to trips query — overlapping trip assignment is now deterministic
-- Added `SyncForTripAsync` — trip-scoped sync with wrong-trip reassignment correction
-- Added `Pending` flag to `PlaidTransaction` — pending transactions are now skipped to prevent duplicate imports
-- Exposed `?trip_id` query param on `POST /api/plaid/sync`
-- Upgraded CLAUDE.md to living architecture document
-- Added Claude Code skills for dev workflow (systematic-debugger, financial-integrity, feature-planner, senior-code-reviewer, documentation-architect, security-auditor, architecture-decision-reviewer)
-
-### Prior
-- Upgraded from .NET 7 to .NET 8 LTS
-- Fixed exchange-token JSON binding for snake_case `public_token` field
-- Added budget calculation, trip stops, budget categories
-- Aligned entities with Supabase schema
-- Integrated Plaid via Going.Plaid SDK
+```
+src/
+  CampCost.Api/             ASP.NET Core host — controllers, middleware, Program.cs
+  CampCost.Core/            Entities, domain services, interfaces (no external deps)
+  CampCost.Infrastructure/  EF Core, Plaid SDK integration, sync orchestration
+tests/
+  CampCost.Tests/           xUnit tests for Core domain services
+client/                     React + Vite SPA
+  supabase/migrations/      Database schema + RLS policies
+docs/                       Architecture deep-dive
+Dockerfile                  Multi-stage build for the API (Railway)
+```
