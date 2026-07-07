@@ -6,7 +6,9 @@ namespace CampCost.Core.Services;
 /// Calculates "money left" and "days left on the road" for a trip.
 ///
 /// Money left:
-///   planned_budget - sum(expenses.amount)
+///   planned_budget - sum(spend)
+///   spend = SUM(transactions where trip_id = trip AND not deleted) + manual expenses.
+///           Both sources implement ISpendLine so they sum uniformly here.
 ///   planned_budget = sum(budget_categories.planned_amount) if rows exist,
 ///                    otherwise falls back to trip.total_budget.
 ///
@@ -21,11 +23,11 @@ public class BudgetCalculationService
 {
     public TripBudgetSummary Calculate(
         Trip trip,
-        IEnumerable<Expense> expenses,
+        IEnumerable<ISpendLine> spendLines,
         IEnumerable<BudgetCategory>? budgetCategories = null)
     {
-        var expenseList = expenses.ToList();
-        var spent = expenseList.Sum(e => e.Amount);
+        var spendList = spendLines.ToList();
+        var spent = spendList.Sum(e => e.Amount);
 
         // Planned budget: prefer sum of per-category planned amounts if available
         var categoryList = budgetCategories?.ToList();

@@ -6,7 +6,7 @@ namespace CampCost.Core.Entities;
 /// category must match the expense_category enum: fuel, campground, food_groceries,
 /// gear, repairs, propane_utilities, activities, misc.
 /// </summary>
-public class Expense
+public class Expense : ISpendLine
 {
     public Guid Id { get; set; }
     public Guid TripId { get; set; }           // NOT NULL in DB — skip tx if no trip match
