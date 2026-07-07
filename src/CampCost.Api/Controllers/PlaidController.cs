@@ -103,6 +103,31 @@ public class PlaidController : ControllerBase
         return Ok(result);
     }
 
+    // POST /api/plaid/reset-cursor
+    // Forces the next sync to re-pull the full available history from Plaid by clearing the
+    // stored cursor on every connection this user owns. Stored transactions are NOT deleted:
+    // dedup on plaid_transaction_id (including soft-deleted rows) prevents re-inserting, so
+    // this is a safe "re-pull from scratch" that never destroys the source of truth. Pair it
+    // with POST /api/plaid/sync?trip_id= to re-pull and re-claim in one user action.
+    [HttpPost("reset-cursor")]
+    public async Task<IActionResult> ResetCursor()
+    {
+        var connections = await _db.PlaidConnections
+            .Where(c => c.UserId == UserId)
+            .ToListAsync();
+
+        foreach (var c in connections)
+            c.SyncCursor = null;
+
+        await _db.SaveChangesAsync();
+
+        _logger.LogInformation(
+            "Reset sync cursor on {Count} connection(s) for user {UserId} — next sync re-pulls full history",
+            connections.Count, UserId);
+
+        return Ok(new { success = true, connections_reset = connections.Count });
+    }
+
     // POST /api/plaid/webhook
     // Receives push notifications from Plaid. Only acts on TRANSACTIONS webhooks.
     // Looks up the affected user by item_id and syncs only them.
