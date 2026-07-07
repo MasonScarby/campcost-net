@@ -50,8 +50,12 @@ Preferred, not strict law — don't block future refactors over layering purity.
 
 | Priority | Issue | File | Fix |
 |---|---|---|---|
-| CRITICAL | Webhook has no Plaid signature validation — anyone can POST and trigger a sync | `PlaidController.cs` | Validate `Plaid-Verification` header before processing (approach needs a decision — JWT verification via Plaid `/webhook_verification_key/get`) |
-| ✅ Resolved | Webhook fell back to `SyncAllAsync()` if item_id lookup failed — now returns `Ok()` early when the connection is not found; never syncs all users from an unauthenticated request | `PlaidController.cs` | |
+| ✅ Resolved | Webhook had no Plaid signature validation — every webhook now requires a valid `Plaid-Verification` ES256 JWT (key fetched from `/webhook_verification_key/get` by `kid`, cached in-memory; signature + `iat` freshness + `request_body_sha256` body hash all checked, 401 otherwise) | `PlaidWebhookVerifier.cs`, `PlaidController.cs` | |
+| ✅ Resolved | Webhook fell back to `SyncAllAsync()` if item_id lookup failed — unknown item_id now logs + returns `Ok()`; `SyncAllAsync` has been deleted entirely so no sync-all is reachable from anywhere | `PlaidController.cs`, `TransactionSyncService.cs` | |
+| ✅ Resolved | Browser could SELECT `access_token`/`item_id`/`sync_cursor` from `plaid_connections` (RLS limits rows, not columns) — table grants revoked from `anon`/`authenticated`; column-level SELECT re-granted on safe columns only. Apply `003_lock_down_plaid_connections.sql` in the Supabase SQL editor | `client/supabase/migrations/003_lock_down_plaid_connections.sql` | |
+| ✅ Resolved | Swagger + `/` → Swagger redirect exposed in production — Swagger now Development-only; `/` returns a plain 200 health response | `Program.cs` | |
+| ✅ Resolved | JWT validation accepted any issuer/audience — now pinned to `{Supabase:Url}/auth/v1` and audience `authenticated` | `Program.cs` | |
+| ✅ Resolved | No rate limiting — `/api/plaid/*` limited to 10 req/min per user, webhook to 30 req/min per IP, 429 on excess | `Program.cs`, `PlaidController.cs` | |
 | ✅ Resolved | CORS hardcoded to localhost — now driven by `Cors:AllowedOrigins` config. Production: set `Cors__AllowedOrigins__0=https://your-frontend-url` | `Program.cs` | |
 | ✅ Resolved | `ExchangeToken` missing `UserId` filter — query now includes `&& c.UserId == UserId`, so one user can't overwrite another's connection | `PlaidController.cs` | |
 | ✅ Resolved | Null `TransactionId` fallback generated a random GUID — transactions without a stable ID are now skipped with a warning log | `PlaidService.cs` | |
