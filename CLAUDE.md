@@ -14,8 +14,19 @@ Preferred, not strict law — don't block future refactors over layering purity.
 - **Api** — controllers + middleware only. No business logic in controllers.
 
 ## Domain Model
-- `Trip` → `TripStop` → `Expense`
-- Expenses come from: Plaid transactions OR manual entry
+- `Trip` → `TripStop`; spend comes from `Transaction` (Plaid) + `Expense` (manual)
+- **`transactions`** (migration 004) = raw Plaid mirror, **source of truth** for bank spend.
+  Every synced Plaid delta lands here regardless of trips; `trip_id` is NULLABLE (NULL until a
+  trip claims it by date range or manual assignment). Ingestion is decoupled from trips.
+- **`expenses`** = MANUAL entries only, going forward. (Legacy Plaid `expenses` rows are moved
+  into `transactions` and deleted by migration 004.)
+- **Trip Plaid spend** = `SUM(transactions WHERE trip_id = trip AND deleted_at IS NULL)`;
+  **total trip spend** adds manual `expenses`. Both entities implement `ISpendLine` so
+  `BudgetCalculationService` sums them uniformly.
+- Assignment: `TripController` POST/PUT auto-assign unassigned, non-reviewed transactions whose
+  date falls in `[start_date, end_date]`; `PATCH /api/transactions/{id}/assign` is the manual
+  override (sets `reviewed=true` so auto-assign never moves it again). `reviewed=true` =
+  user-confirmed; never auto-reassigned. `GET /api/transactions/unassigned` feeds the review queue.
 - Never duplicate pending + posted transactions
 - Budget must always be derived from source of truth — no stale cache. Caching only allowed for performance if invalidation is guaranteed.
 - All money uses `decimal` type
@@ -42,8 +53,8 @@ Preferred, not strict law — don't block future refactors over layering purity.
 | ✅ Resolved | Overlapping trips arbitrary order — `FindMatchingTrip` now sorts by `StartDate` internally, deterministic regardless of caller |
 | ✅ Resolved | Date range backward sync — obsolete: cursor-based `/transactions/sync` replaced date windows |
 | ✅ Resolved | Pending → settled reconciliation — migrated to `/transactions/sync`; pending imported, settled version updates the row in place (ID swap), never both |
-| ✅ Resolved | No active trips = silent black hole — sync now skips (without advancing the cursor) and returns `SyncResult.Warning` |
-| ⚠️ Open | Transactions with no matching trip are skipped AND the cursor advances past them — they will not be re-imported later (pre-migration they were re-fetchable by date). Trip-specific sync reassigns existing rows but cannot recover skipped ones |
+| ✅ Resolved | No active trips = silent black hole — obsolete: sync now stores every transaction in `transactions` (unassigned, `trip_id` NULL) even with no trips; `SyncResult.Warning` only notes there was nothing to auto-assign to |
+| ✅ Resolved | Transactions with no matching trip lost past the cursor — **fixed by the `transactions` table (migration 004)**. Ingestion is decoupled from trips: every delta is stored regardless of trip match, `trip_id` left NULL until claimed. Nothing is ever skipped past the cursor, so no data loss. Unassigned rows are claimed later via auto-assign (trip create/date change) or manual assignment |
 | ⚠️ Low | Timezone drift — 2-day buffer mostly covers it |
 
 ## Security & Correctness Issues (Fix Before Go-Live)
@@ -67,18 +78,21 @@ Preferred, not strict law — don't block future refactors over layering purity.
 ## Engineering Notes (Deep Context)
 
 ### Pending → Settled Duplicate Problem (RESOLVED)
-Plaid assigns a different `transaction_id` to a pending transaction vs the same transaction once it settles. Ingestion now uses `/transactions/sync` (`added/modified/removed` deltas). Pending transactions ARE imported. When one settles, Plaid sends `added` (new ID, with `pending_transaction_id` pointing at the old one) + `removed` (old pending ID): the added-handler updates the existing pending row in place and swaps its Plaid ID to the settled one, so pending + settled never coexist. `removed` deltas soft-delete (`expenses.deleted_at`) — a global EF query filter hides soft-deleted rows everywhere; sync dedup uses `IgnoreQueryFilters()` so removed transactions are never re-imported.
+Plaid assigns a different `transaction_id` to a pending transaction vs the same transaction once it settles. Ingestion now uses `/transactions/sync` (`added/modified/removed` deltas). Pending transactions ARE imported. When one settles, Plaid sends `added` (new ID, with `pending_transaction_id` pointing at the old one) + `removed` (old pending ID): the added-handler updates the existing pending row in place and swaps its Plaid ID to the settled one, so pending + settled never coexist. `removed` deltas soft-delete (`transactions.deleted_at`) — a global EF query filter hides soft-deleted rows everywhere; sync dedup uses `IgnoreQueryFilters()` so removed transactions are never re-imported. (This now operates on the `transactions` table, not `expenses`.)
 
 ### Timezone Drift
 Plaid returns date-only strings (no time). Server uses `DateTime.UtcNow`. For users in UTC-5 to UTC-8, a transaction at 10 PM local appears as next calendar day in UTC — can miss trip date windows by one day. The existing 2-day buffer mostly covers this.
 
-### Sync Logic (cursor-based)
-- Ingestion is cursor-based via `/transactions/sync` — no more date windows for fetching
+### Sync Logic (cursor-based, writes to `transactions`)
+- Ingestion is cursor-based via `/transactions/sync` and writes to the **`transactions`** table (NOT `expenses`) — `TransactionSyncService`
 - Cursor stored per connection in `plaid_connections.sync_cursor` (migration `002_transactions_sync.sql`); persisted in the same `SaveChanges` as the applied deltas so it never advances past unstored data
 - First sync (`sync_cursor` NULL): Plaid returns full available history as `added`
-- If a user has no planning/active trips, the sync is skipped WITHOUT advancing the cursor (otherwise deltas would be dropped forever) and `SyncResult.Warning` is set
-- Trip-specific sync (`POST /api/plaid/sync?trip_id=`): runs the normal cursor sync routing in-window transactions to that trip, then reassigns existing Plaid expenses within the trip window (start−2 … min(end+2, today), 90-day cap) from other trips
-- Dedup: `plaid_transaction_id` unique index + in-memory lookup (including soft-deleted rows) prevents re-inserting
+- **No trip gating**: every delta is stored regardless of trips. `added` → insert (dedup on `plaid_transaction_id` via `IgnoreQueryFilters` so soft-deleted rows still block reimport), `trip_id` set only if a planning/active trip window contains the date else NULL; `modified` → update in place; pending→settled swaps the row's Plaid ID in place (never both versions); `removed` → soft-delete (`deleted_at`). Credits (amount < 0) are skipped.
+- If a user has no planning/active trips, the sync STILL runs and stores everything unassigned; `SyncResult.Warning` just notes nothing was auto-assigned. No black hole, no data loss.
+- Trip-specific sync (`POST /api/plaid/sync?trip_id=`): runs the normal cursor sync routing in-window transactions to that trip, then claims existing unassigned / other-trip **non-reviewed** transactions in the trip window (start−2 … min(end+2, today), 90-day cap). Reviewed rows are never moved.
+- Assignment lives in `TransactionAssignmentService` (auto-assign on trip create/update via `TripController`; manual via `TransactionController`).
+- Free-tier 100-txn cap is not in main yet — a `TODO` in `TransactionSyncService` marks where to gate on the trip-ASSIGNED count (not the raw stored count) when it lands.
+- Dedup: global `plaid_transaction_id` unique index (migration 004) + in-memory lookup (including soft-deleted rows) prevents re-inserting
 
 ### Trip Matching Order
 `FindMatchingTrip` uses `FirstOrDefault` over trips ordered by `StartDate ASC`. If two trips overlap, earliest-starting trip wins. This is deterministic now — it wasn't before the `OrderBy` fix.
