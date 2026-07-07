@@ -8,24 +8,25 @@ using Microsoft.Extensions.Logging;
 namespace CampCost.Infrastructure.Services;
 
 /// <summary>
-/// Cursor-based ingestion via Plaid /transactions/sync.
+/// Cursor-based ingestion via Plaid /transactions/sync into the `transactions` table
+/// (migration 004) — the raw Plaid mirror and source of truth. Ingestion is fully
+/// decoupled from trips: every delta is stored regardless of whether a trip claims it,
+/// so the old "unmatched transaction skipped past the cursor = permanent data loss" bug
+/// disappears by construction.
 ///
-/// Delta handling:
+/// Delta handling (all against `transactions`, never `expenses`):
 ///   added    → insert (dedup on plaid_transaction_id). If the added transaction carries a
-///              pending_transaction_id that matches an expense we already imported while it
-///              was pending, the existing row is updated in place — the Plaid ID is swapped
-///              to the settled ID so a pending and its settled version never coexist.
+///              pending_transaction_id matching a pending row we already imported, the
+///              existing row is updated in place — the Plaid ID is swapped to the settled
+///              ID so a pending and its settled version never coexist. trip_id is set only
+///              if a planning/active trip's window contains the date, else left NULL.
 ///   modified → update the existing row in place (amount/date/merchant corrections).
 ///   removed  → soft-delete (DeletedAt) — financial history is never hard-deleted.
 ///
-/// Pending transactions ARE imported (the old skip-all-pending workaround is gone):
-/// /transactions/sync reconciles the pending→settled ID swap natively via the
-/// added + removed pair, so both versions can never be present at once.
-///
 /// The cursor is persisted on the connection in the same SaveChanges as the applied
-/// deltas. If no active trips exist for a user, the sync is skipped WITHOUT advancing
-/// the cursor (advancing it would permanently drop those deltas) and a warning is
-/// returned in SyncResult.
+/// deltas, so it never advances past unstored data. When a user has no planning/active
+/// trips the sync STILL runs and stores every transaction as unassigned (trip_id NULL) —
+/// SyncResult.Warning simply notes there was nothing to auto-assign to.
 /// </summary>
 public class TransactionSyncService : ITransactionSyncService
 {
@@ -33,8 +34,8 @@ public class TransactionSyncService : ITransactionSyncService
     private const int MaxDays = 90;
 
     public const string NoActiveTripsWarning =
-        "No active or planning trips to match transactions against — sync was skipped so no " +
-        "transactions are lost. Create or activate a trip, then sync again.";
+        "Transactions were stored, but there are no active or planning trips to assign them " +
+        "to — they're saved as unassigned. Create or activate a trip to claim them.";
 
     private readonly CampCostDbContext _db;
     private readonly IPlaidService _plaid;
@@ -66,9 +67,10 @@ public class TransactionSyncService : ITransactionSyncService
 
     /// <summary>
     /// Trip-specific sync: runs the normal cursor sync (new transactions inside this
-    /// trip's window are routed to this trip), then reassigns any existing Plaid
-    /// expenses that fall inside the trip's window but landed on a different trip —
-    /// corrects the "two overlapping trips, wrong trip got the transactions" problem.
+    /// trip's window are routed to this trip), then claims any existing unassigned or
+    /// non-reviewed transactions that fall inside the trip's window — corrects the
+    /// "transaction landed on the wrong trip / no trip" problem. Reviewed transactions
+    /// are never moved (user-confirmed assignments are respected).
     /// </summary>
     public async Task<SyncResult> SyncForTripAsync(Guid userId, Guid tripId)
     {
@@ -86,26 +88,29 @@ public class TransactionSyncService : ITransactionSyncService
         // 1. Pull the latest deltas, routing new in-window transactions to this trip
         var result = await SyncConnectionsAsync(connections, targetTrip: trip);
 
-        // 2. Reassign existing Plaid expenses inside this trip's window that are on another trip
+        // 2. Claim existing in-window transactions on other trips / unassigned, except
+        //    reviewed rows (user-confirmed assignments are never auto-moved).
         var (windowStart, windowEnd) = GetTripWindow(trip);
 
-        var toReassign = await _db.Expenses
-            .Where(e => e.UserId == userId
-                        && e.TripId != tripId
-                        && e.PlaidTransactionId != null
-                        && e.Source == "plaid"
-                        && e.ExpenseDate >= windowStart
-                        && e.ExpenseDate <= windowEnd)
+        var toReassign = await _db.Transactions
+            .Where(t => t.UserId == userId
+                        && t.TripId != tripId
+                        && !t.Reviewed
+                        && t.TransactionDate >= windowStart
+                        && t.TransactionDate <= windowEnd)
             .ToListAsync();
 
-        foreach (var expense in toReassign)
-            expense.TripId = tripId;
+        foreach (var tx in toReassign)
+        {
+            tx.TripId = tripId;
+            tx.UpdatedAt = DateTime.UtcNow;
+        }
 
         if (toReassign.Count > 0)
             await _db.SaveChangesAsync();
 
         _logger.LogInformation(
-            "Trip sync for trip {TripId}: reassigned {Reassigned} existing expense(s) into window {Start}..{End}",
+            "Trip sync for trip {TripId}: claimed {Reassigned} existing transaction(s) into window {Start}..{End}",
             tripId, toReassign.Count, windowStart, windowEnd);
 
         return result with { ExpensesUpserted = result.ExpensesUpserted + toReassign.Count };
@@ -139,7 +144,8 @@ public class TransactionSyncService : ITransactionSyncService
 
         foreach (var connection in connections)
         {
-            // Only match against planning/active trips — same as original JS filter
+            // Trips are only used to AUTO-ASSIGN newly stored transactions. Their absence
+            // no longer gates ingestion — every transaction is stored either way.
             var trips = await _db.Trips
                 .Where(t => t.UserId == connection.UserId &&
                             (t.Status == "planning" || t.Status == "active"))
@@ -147,16 +153,7 @@ public class TransactionSyncService : ITransactionSyncService
                 .ToListAsync();
 
             if (trips.Count == 0)
-            {
-                // Do NOT call Plaid / advance the cursor here: /transactions/sync only
-                // delivers each delta once per cursor position, so skipping transactions
-                // while advancing the cursor would drop them permanently.
-                _logger.LogWarning(
-                    "Sync skipped for connection {ConnectionId} (user {UserId}): no active trips to match against",
-                    connection.Id, connection.UserId);
                 warning = NoActiveTripsWarning;
-                continue;
-            }
 
             _logger.LogInformation(
                 "Plaid sync start: connection {ConnectionId}, user {UserId}, first sync: {IsFirstSync}",
@@ -165,13 +162,13 @@ public class TransactionSyncService : ITransactionSyncService
             var delta = await _plaid.SyncTransactionsAsync(connection.AccessToken, connection.SyncCursor);
             fetched += delta.Added.Count + delta.Modified.Count;
 
-            // All existing Plaid-sourced expenses for this user, INCLUDING soft-deleted
-            // ones (IgnoreQueryFilters) so a removed transaction is never re-imported
-            // and modified/removed deltas can still find their row.
-            var existingByPlaidId = await _db.Expenses
+            // All existing transactions for this user, INCLUDING soft-deleted ones
+            // (IgnoreQueryFilters) so a removed transaction is never re-imported and
+            // modified/removed deltas can still find their row.
+            var existingByPlaidId = await _db.Transactions
                 .IgnoreQueryFilters()
-                .Where(e => e.UserId == connection.UserId && e.PlaidTransactionId != null)
-                .ToDictionaryAsync(e => e.PlaidTransactionId!);
+                .Where(t => t.UserId == connection.UserId)
+                .ToDictionaryAsync(t => t.PlaidTransactionId);
 
             foreach (var tx in delta.Added)
             {
@@ -192,30 +189,18 @@ public class TransactionSyncService : ITransactionSyncService
                     continue;
                 }
 
-                // Dedup on plaid_transaction_id
+                // Dedup on plaid_transaction_id (includes soft-deleted rows)
                 if (existingByPlaidId.ContainsKey(tx.TransactionId)) { skipped++; continue; }
 
-                var matchedTrip = MatchTrip(tx.Date, trips, targetTrip);
+                // TODO(free-tier cap): the fraud-prevention work caps free-plan users at
+                // 100 transactions. When that lands, gate the INSERT below on the user's
+                // trip-ASSIGNED transaction count (trip_id != null && deleted_at == null),
+                // NOT the raw stored count — unassigned Plaid rows must not burn the quota.
 
-                // No trip to assign to — skip (trip_id is NOT NULL in the DB)
-                if (matchedTrip is null) { skipped++; continue; }
-
-                var expense = new Expense
-                {
-                    Id = Guid.NewGuid(),
-                    UserId = connection.UserId,
-                    TripId = matchedTrip.Id,
-                    PlaidTransactionId = tx.TransactionId,
-                    MerchantName = tx.MerchantName,
-                    Amount = tx.Amount,
-                    Category = _categorizer.Categorize(tx.Name, tx.MerchantName),
-                    ExpenseDate = tx.Date,
-                    Source = "plaid",
-                    Reviewed = false,
-                    CreatedAt = DateTime.UtcNow
-                };
-                _db.Expenses.Add(expense);
-                existingByPlaidId[tx.TransactionId] = expense;
+                var newRow = Build(connection, tx, MatchTrip(tx.Date, trips, targetTrip)?.Id);
+                _db.Transactions.Add(newRow);
+                // Track it so a later modified/removed delta in the same run finds it.
+                existingByPlaidId[tx.TransactionId] = newRow;
                 upserted++;
             }
 
@@ -231,39 +216,20 @@ public class TransactionSyncService : ITransactionSyncService
 
                 if (tx.Amount < 0) { skipped++; continue; }
 
-                // Modified delta for a transaction we never imported (e.g. it was pending
-                // and skipped under the old /transactions/get flow) — treat as added.
-                var matchedTrip = MatchTrip(tx.Date, trips, targetTrip);
-                if (matchedTrip is null) { skipped++; continue; }
-
-                var expense = new Expense
-                {
-                    Id = Guid.NewGuid(),
-                    UserId = connection.UserId,
-                    TripId = matchedTrip.Id,
-                    PlaidTransactionId = tx.TransactionId,
-                    MerchantName = tx.MerchantName,
-                    Amount = tx.Amount,
-                    Category = _categorizer.Categorize(tx.Name, tx.MerchantName),
-                    ExpenseDate = tx.Date,
-                    Source = "plaid",
-                    Reviewed = false,
-                    CreatedAt = DateTime.UtcNow
-                };
-                _db.Expenses.Add(expense);
-                existingByPlaidId[tx.TransactionId] = expense;
+                // Modified delta for a transaction we never imported — treat as added.
+                var newRow = Build(connection, tx, MatchTrip(tx.Date, trips, targetTrip)?.Id);
+                _db.Transactions.Add(newRow);
+                existingByPlaidId[tx.TransactionId] = newRow;
                 upserted++;
             }
 
             foreach (var plaidId in delta.RemovedTransactionIds)
             {
                 // Soft-delete only — financial history is never hard-deleted.
-                // Note: when a pending transaction settles, its `removed` delta usually
-                // finds nothing here because the added-handler already swapped the row's
-                // Plaid ID to the settled ID.
                 if (existingByPlaidId.TryGetValue(plaidId, out var row) && row.DeletedAt is null)
                 {
                     row.DeletedAt = DateTime.UtcNow;
+                    row.UpdatedAt = DateTime.UtcNow;
                     removed++;
                 }
             }
@@ -282,9 +248,34 @@ public class TransactionSyncService : ITransactionSyncService
         return new SyncResult(connections.Count, fetched, upserted, skipped, removed, warning);
     }
 
+    private Transaction Build(PlaidConnection connection, PlaidTransaction tx, Guid? tripId)
+    {
+        var now = DateTime.UtcNow;
+        return new Transaction
+        {
+            Id = Guid.NewGuid(),
+            UserId = connection.UserId,
+            PlaidConnectionId = connection.Id,
+            PlaidTransactionId = tx.TransactionId,
+            PendingTransactionId = tx.PendingTransactionId,
+            TripId = tripId,
+            Amount = tx.Amount,
+            TransactionDate = tx.Date,
+            MerchantName = tx.MerchantName,
+            Name = tx.Name,
+            Category = _categorizer.Categorize(tx.Name, tx.MerchantName),
+            Pending = tx.Pending,
+            Reviewed = false,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+    }
+
     /// <summary>
-    /// Trip routing: trip-specific syncs force in-window transactions onto the target
-    /// trip; everything else goes through the normal date-window matcher.
+    /// Trip routing for AUTO-assignment of newly stored transactions: trip-specific syncs
+    /// force in-window transactions onto the target trip; everything else goes through the
+    /// normal date-window matcher. Returns null (unassigned) when nothing matches — the
+    /// transaction is still stored.
     /// </summary>
     private Trip? MatchTrip(DateOnly date, List<Trip> trips, Trip? targetTrip)
     {
@@ -296,13 +287,17 @@ public class TransactionSyncService : ITransactionSyncService
         return _matcher.FindMatchingTrip(date, trips);
     }
 
-    /// <summary>Update an existing expense from a Plaid delta — the pending→settled and `modified` path.</summary>
-    private void ApplyTransaction(Expense expense, PlaidTransaction tx)
+    /// <summary>Update an existing transaction from a Plaid delta — the pending→settled and `modified` path.</summary>
+    private void ApplyTransaction(Transaction row, PlaidTransaction tx)
     {
-        expense.PlaidTransactionId = tx.TransactionId;
-        expense.MerchantName = tx.MerchantName;
-        expense.Amount = tx.Amount;
-        expense.ExpenseDate = tx.Date;
-        expense.Category = _categorizer.Categorize(tx.Name, tx.MerchantName);
+        row.PlaidTransactionId = tx.TransactionId;
+        row.PendingTransactionId = tx.PendingTransactionId;
+        row.MerchantName = tx.MerchantName;
+        row.Name = tx.Name;
+        row.Amount = tx.Amount;
+        row.TransactionDate = tx.Date;
+        row.Category = _categorizer.Categorize(tx.Name, tx.MerchantName);
+        row.Pending = tx.Pending;
+        row.UpdatedAt = DateTime.UtcNow;
     }
 }

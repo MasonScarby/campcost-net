@@ -19,6 +19,7 @@ public class CampCostDbContext : DbContext
     public DbSet<BudgetCategory> BudgetCategories => Set<BudgetCategory>();
     public DbSet<TripStop> TripStops => Set<TripStop>();
     public DbSet<Subscription> Subscriptions => Set<Subscription>();
+    public DbSet<Transaction> Transactions => Set<Transaction>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -70,6 +71,43 @@ public class CampCostDbContext : DbContext
             e.HasIndex(x => new { x.UserId, x.PlaidTransactionId })
              .IsUnique()
              .HasFilter("plaid_transaction_id IS NOT NULL");
+        });
+
+        // transactions — raw Plaid mirror (migration 004). Source of truth for bank spend.
+        modelBuilder.Entity<Transaction>(e =>
+        {
+            e.ToTable("transactions");
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.UserId).HasColumnName("user_id");
+            e.Property(x => x.PlaidConnectionId).HasColumnName("plaid_connection_id");
+            e.Property(x => x.PlaidTransactionId).HasColumnName("plaid_transaction_id");
+            e.Property(x => x.PendingTransactionId).HasColumnName("pending_transaction_id");
+            e.Property(x => x.TripId).HasColumnName("trip_id");
+            e.Property(x => x.Amount).HasColumnName("amount");
+            e.Property(x => x.TransactionDate).HasColumnName("transaction_date");
+            e.Property(x => x.MerchantName).HasColumnName("merchant_name");
+            e.Property(x => x.Name).HasColumnName("name");
+            e.Property(x => x.Category)
+             .HasColumnName("category")
+             .HasColumnType("expense_category")
+             .HasConversion(
+                 v => Enum.Parse<ExpenseCategoryEnum>(v),
+                 v => v.ToString());
+            e.Property(x => x.Pending).HasColumnName("pending");
+            e.Property(x => x.Reviewed).HasColumnName("reviewed");
+            e.Property(x => x.DeletedAt).HasColumnName("deleted_at");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at");
+            e.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+
+            // Soft-deleted transactions (Plaid `removed` deltas) are hidden everywhere by
+            // default — budgets, trip views, review screens. Sync code uses
+            // IgnoreQueryFilters() for dedup lookups so a removed transaction is never
+            // re-imported and modified/removed deltas can still find their row.
+            e.HasQueryFilter(x => x.DeletedAt == null);
+
+            // Global unique on plaid_transaction_id, matching migration 004. Survives
+            // soft-delete so a removed transaction can never be re-inserted.
+            e.HasIndex(x => x.PlaidTransactionId).IsUnique();
         });
 
         // plaid_connections
