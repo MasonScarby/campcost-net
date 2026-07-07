@@ -28,6 +28,23 @@ export default function Account() {
   const [syncStatus, setSyncStatus] = useState('idle') // idle | syncing | done | error
   const [syncResult, setSyncResult] = useState(null)
   const [plan, setPlanState] = useState(getPlan)
+  const [unassigned, setUnassigned] = useState([])
+
+  const fetchUnassigned = async () => {
+    try {
+      const res = await backendFetch('/api/transactions/unassigned')
+      if (res.ok) setUnassigned(await res.json())
+    } catch { /* backend offline — leave list empty */ }
+  }
+
+  const assignTransaction = async (txId, tripId) => {
+    if (!tripId) return
+    const res = await backendFetch(`/api/transactions/${txId}/assign`, {
+      method: 'PATCH',
+      body: JSON.stringify({ trip_id: tripId }),
+    })
+    if (res.ok) setUnassigned(prev => prev.filter(t => t.id !== txId))
+  }
 
   const togglePlan = () => {
     const next = plan === 'free' ? 'pro' : 'free'
@@ -47,13 +64,14 @@ export default function Account() {
     const fetchData = async () => {
       const [{ data: conns }, { data: tripsData }] = await Promise.all([
         supabase.from('plaid_connections').select('institution_name, last_sync_at').eq('user_id', user.id),
-        supabase.from('trips').select('id, status').eq('user_id', user.id),
+        supabase.from('trips').select('id, name, status').eq('user_id', user.id),
       ])
       setConnections(conns ?? [])
       setTrips(tripsData ?? [])
       setLoading(false)
     }
     fetchData()
+    fetchUnassigned()
   }, [user.id])
 
   const handleSync = async () => {
@@ -66,6 +84,7 @@ export default function Account() {
       setSyncResult(data.synced)
       setSyncStatus('done')
       fetchConnections()
+      fetchUnassigned()
       setTimeout(() => setSyncStatus('idle'), 4000)
     } catch (err) {
       if (err.message === 'Failed to fetch') {
@@ -232,6 +251,36 @@ export default function Account() {
           </>
         )}
       </div>
+
+      {/* Unassigned transactions — synced from the bank but not yet claimed by a trip */}
+      {unassigned.length > 0 && (
+        <div style={{ background: 'white', borderRadius: 16, border: '1px solid #e8d5b0', padding: 20, marginBottom: 12 }}>
+          <h2 style={{ fontSize: 15, fontWeight: 600, color: '#4a3728', marginBottom: 4 }}>Unassigned transactions</h2>
+          <p style={{ fontSize: 12, color: '#8b5e3c', marginBottom: 12 }}>
+            {unassigned.length} transaction{unassigned.length !== 1 ? 's' : ''} not tied to a trip. Assign them so they count toward a trip's spend.
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {unassigned.map(t => (
+              <div key={t.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, background: '#f9f5ee', borderRadius: 10, padding: '8px 12px' }}>
+                <div style={{ minWidth: 0 }}>
+                  <p style={{ fontSize: 13, fontWeight: 600, color: '#4a3728', margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {t.merchant_name || t.name || 'Unknown'} · ${Number(t.amount).toFixed(2)}
+                  </p>
+                  <p style={{ fontSize: 11, color: '#8b5e3c', margin: 0 }}>{t.transaction_date}</p>
+                </div>
+                <select
+                  defaultValue=""
+                  onChange={e => assignTransaction(t.id, e.target.value)}
+                  style={{ border: '1px solid #e8d5b0', borderRadius: 8, padding: '6px 8px', fontSize: 12, background: 'white', color: '#4a3728' }}
+                >
+                  <option value="" disabled>Assign to trip…</option>
+                  {trips.map(tr => <option key={tr.id} value={tr.id}>{tr.name || tr.id.slice(0, 8)}</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Sign out */}
       <button

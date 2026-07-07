@@ -50,9 +50,12 @@ export default function Dashboard() {
 
   useEffect(() => {
     const fetchTrips = async () => {
+      // Trip spend now comes from two sources:
+      //   transactions = Plaid mirror (source of truth), assigned to this trip
+      //   expenses     = manual entries only, going forward
       const { data, error } = await supabase
         .from('trips')
-        .select('*, expenses(amount, adjusted_amount, reviewed)')
+        .select('*, expenses(amount, adjusted_amount, reviewed), transactions(amount, reviewed)')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false })
       if (!error) setTrips(data ?? [])
@@ -82,10 +85,17 @@ export default function Dashboard() {
     setEditingFunds(false)
   }
 
-  const totalSpent = (trip) =>
-    (trip.expenses ?? [])
+  const totalSpent = (trip) => {
+    // Manual expenses (skip un-reviewed pending items, honor adjusted amounts)
+    const manual = (trip.expenses ?? [])
       .filter(e => e.reviewed !== false)
       .reduce((sum, e) => sum + (e.adjusted_amount != null ? Number(e.adjusted_amount) : Number(e.amount)), 0)
+    // Plaid transactions assigned to this trip (source of truth). Soft-deleted rows are
+    // excluded server-side; the authoritative figure is /api/trips/{id}/budget.
+    const plaid = (trip.transactions ?? [])
+      .reduce((sum, t) => sum + Number(t.amount), 0)
+    return manual + plaid
+  }
 
   // Find the most relevant active trip to feature at the top
   const today = new Date()
