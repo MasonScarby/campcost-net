@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
+import { backendFetch } from '../lib/api'
 
 const CATEGORY_LABELS = {
   fuel: 'Fuel', campground: 'Campground', food_groceries: 'Food & Groceries',
@@ -14,50 +15,33 @@ export default function TransactionReview() {
   const { user } = useAuth()
   const [unreviewed, setUnreviewed] = useState([])
   const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
   const [current, setCurrent] = useState(0)
   const [editCategory, setEditCategory] = useState(null)
 
   useEffect(() => {
+    // Review queue is the Plaid `transactions` (source of truth) that were auto-assigned
+    // to this trip but not yet user-confirmed (reviewed=false). Browser reads them directly
+    // (read-only RLS); confirm/remove writes go through the assign API. No client-side date
+    // filtering is needed — the backend already scoped these to the trip by trip_id.
     const fetchUnreviewed = async () => {
-      const [{ data: trip }, { data: expenses }] = await Promise.all([
-        supabase.from('trips').select('start_date, end_date').eq('id', id).single(),
-        supabase.from('expenses').select('*').eq('trip_id', id).eq('reviewed', false)
-          .order('expense_date', { ascending: false }),
-      ])
+      const { data: txns } = await supabase
+        .from('transactions').select('*')
+        .eq('trip_id', id).eq('reviewed', false)
+        .order('transaction_date', { ascending: false })
 
-      const BUFFER = 2
-      const start = trip?.start_date ? new Date(trip.start_date) : null
-      const end = trip?.end_date ? new Date(trip.end_date) : null
-
-      const inRange = []
-      const outOfRange = []
-
-      for (const e of (expenses ?? [])) {
-        const d = new Date(e.expense_date)
-        let outside = false
-        if (start) {
-          const cutoff = new Date(start); cutoff.setDate(cutoff.getDate() - BUFFER)
-          if (d < cutoff) { outside = true }
-        }
-        if (end) {
-          const cutoff = new Date(end); cutoff.setDate(cutoff.getDate() + BUFFER)
-          if (d > cutoff) { outside = true }
-        }
-        outside ? outOfRange.push(e) : inRange.push(e)
-      }
-
-      setUnreviewed(inRange)
-      if (inRange[0]) setEditCategory(inRange[0].category)
+      setUnreviewed(txns ?? [])
+      if (txns?.[0]) setEditCategory(txns[0].category)
       setLoading(false)
     }
     fetchUnreviewed()
 
-    // Real-time: prepend new Plaid-synced expenses as they arrive
+    // Real-time: prepend newly auto-assigned transactions as they arrive
     const channel = supabase
-      .channel(`expenses:trip:${id}`)
+      .channel(`transactions:trip:${id}`)
       .on(
         'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'expenses', filter: `trip_id=eq.${id}` },
+        { event: 'INSERT', schema: 'public', table: 'transactions', filter: `trip_id=eq.${id}` },
         (payload) => {
           if (payload.new.reviewed === false) {
             setUnreviewed(prev => [payload.new, ...prev])
@@ -75,27 +59,35 @@ export default function TransactionReview() {
     setEditCategory(unreviewed[next]?.category ?? 'misc')
   }
 
+  // Confirm = keep on this trip and mark reviewed (assign to the same trip_id).
   const confirmExpense = async () => {
-    const { error } = await supabase
-      .from('expenses')
-      .update({ reviewed: true, category: editCategory })
-      .eq('id', unreviewed[current].id)
-    if (error) { console.error('confirm error:', error.message); return }
-    advance()
+    setSaving(true)
+    try {
+      const res = await backendFetch(`/api/transactions/${unreviewed[current].id}/assign`, {
+        method: 'PATCH',
+        body: JSON.stringify({ trip_id: id }),
+      })
+      if (!res.ok) { console.error('confirm failed:', res.status); return }
+      advance()
+    } finally {
+      setSaving(false)
+    }
   }
 
+  // "Not a trip expense" = unassign the transaction (trip_id null). The immutable Plaid
+  // mirror is never edited or deleted; it just leaves this trip. Dedup still blocks re-import.
   const skipExpense = async () => {
-    // Mark reviewed=true + adjusted_amount=0 instead of deleting.
-    // Keeping the row preserves plaid_transaction_id so the sync dedup
-    // index prevents it from being re-imported on the next sync.
-    // TripDetail uses effectiveAmount() which returns adjusted_amount when set,
-    // so $0 skipped items add nothing to totals. They're also hidden from the list.
-    const { error } = await supabase
-      .from('expenses')
-      .update({ reviewed: true, adjusted_amount: 0, adjustment_note: 'skipped' })
-      .eq('id', unreviewed[current].id)
-    if (error) { console.error('skip error:', error.message); return }
-    advance()
+    setSaving(true)
+    try {
+      const res = await backendFetch(`/api/transactions/${unreviewed[current].id}/assign`, {
+        method: 'PATCH',
+        body: JSON.stringify({ trip_id: null }),
+      })
+      if (!res.ok) { console.error('remove failed:', res.status); return }
+      advance()
+    } finally {
+      setSaving(false)
+    }
   }
 
   if (loading) return (
@@ -147,37 +139,38 @@ export default function TransactionReview() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
               <div>
                 <p style={{ fontSize: 20, fontWeight: 700, color: '#4a3728', margin: 0 }}>
-                  {unreviewed[current].merchant_name || unreviewed[current].note || 'Unknown merchant'}
+                  {unreviewed[current].merchant_name || unreviewed[current].name || 'Unknown merchant'}
                 </p>
-                <p style={{ fontSize: 14, color: '#8b5e3c', marginTop: 4 }}>{unreviewed[current].expense_date}</p>
+                <p style={{ fontSize: 14, color: '#8b5e3c', marginTop: 4 }}>{unreviewed[current].transaction_date}</p>
               </div>
               <span style={{ fontSize: 28, fontWeight: 700, color: '#4a3728' }}>
                 ${Number(unreviewed[current].amount).toFixed(2)}
               </span>
             </div>
 
+            {/* Category is auto-derived from the Plaid feed. Shown read-only — the immutable
+                transaction mirror isn't edited from the browser. */}
             <div>
               <label style={{ fontSize: 13, fontWeight: 600, color: '#8b5e3c', display: 'block', marginBottom: 8 }}>Category</label>
-              <select value={editCategory} onChange={e => setEditCategory(e.target.value)}
-                style={{ width: '100%', border: '1px solid #e8d5b0', borderRadius: 12, padding: '12px 14px', fontSize: 15, outline: 'none', background: 'white', boxSizing: 'border-box' }}>
-                {Object.entries(CATEGORY_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-              </select>
+              <div style={{ border: '1px solid #e8d5b0', borderRadius: 12, padding: '12px 14px', fontSize: 15, background: '#faf7f2', color: '#4a3728' }}>
+                {CATEGORY_LABELS[editCategory] || editCategory}
+              </div>
             </div>
           </div>
 
           {/* Actions */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            <button onClick={skipExpense} style={{
+            <button onClick={skipExpense} disabled={saving} style={{
               background: 'white', border: '1px solid #e8d5b0', color: '#8b5e3c',
-              borderRadius: 12, padding: '14px', fontSize: 15, fontWeight: 600, cursor: 'pointer'
+              borderRadius: 12, padding: '14px', fontSize: 15, fontWeight: 600, cursor: 'pointer', opacity: saving ? 0.6 : 1
             }}>
               Not a trip expense
             </button>
-            <button onClick={confirmExpense} style={{
+            <button onClick={confirmExpense} disabled={saving} style={{
               background: '#2d5a27', color: 'white', border: 'none',
-              borderRadius: 12, padding: '14px', fontSize: 15, fontWeight: 600, cursor: 'pointer'
+              borderRadius: 12, padding: '14px', fontSize: 15, fontWeight: 600, cursor: 'pointer', opacity: saving ? 0.6 : 1
             }}>
-              Add to trip ✓
+              {saving ? 'Saving...' : 'Add to trip ✓'}
             </button>
           </div>
         </>

@@ -19,7 +19,10 @@ export default function TripDetail() {
   const { user } = useAuth()
   const [trip, setTrip] = useState(null)
   const [budgets, setBudgets] = useState([])
-  const [expenses, setExpenses] = useState([])
+  const [expenses, setExpenses] = useState([]) // manual entries only
+  const [transactions, setTransactions] = useState([]) // Plaid mirror assigned to this trip
+  const [txnBusyId, setTxnBusyId] = useState(null)
+  const [expandedTxnId, setExpandedTxnId] = useState(null)
   const [loading, setLoading] = useState(true)
   const [showAddCash, setShowAddCash] = useState(false)
   const [cashAmount, setCashAmount] = useState('')
@@ -55,40 +58,25 @@ export default function TripDetail() {
 
   useEffect(() => {
     const fetchAll = async () => {
-      const [{ data: t }, { data: b }, { data: e }, { data: s }] = await Promise.all([
+      const [{ data: t }, { data: b }, { data: e }, { data: x }, { data: s }] = await Promise.all([
         supabase.from('trips').select('*').eq('id', id).eq('user_id', user.id).single(),
         supabase.from('budget_categories').select('*').eq('trip_id', id),
+        // expenses = manual entries only, going forward
         supabase.from('expenses').select('*').eq('trip_id', id).order('expense_date', { ascending: false }),
+        // transactions = Plaid mirror (source of truth) assigned to this trip.
+        // Browser has read-only RLS access; all writes go through the API.
+        supabase.from('transactions').select('*').eq('trip_id', id).order('transaction_date', { ascending: false }),
         supabase.from('trip_stops').select('*').eq('trip_id', id).order('arrival_date', { ascending: true }),
       ])
       setTrip(t)
       setBudgets(b ?? [])
       setExpenses(e ?? [])
+      setTransactions(x ?? [])
       setStops(s ?? [])
       setLoading(false)
     }
     fetchAll()
   }, [id, user.id])
-
-  // Returns true if expense_date falls within trip date range ± 2 days.
-  // Compares YYYY-MM-DD strings directly (lexicographic == chronological) to
-  // avoid timezone bugs — new Date('2026-06-11') parses as UTC midnight which
-  // can shift to the wrong local date in US timezones.
-  const isInRange = (expenseDate, t) => {
-    if (!expenseDate) return false
-    const BUFFER = 2
-    // Use noon UTC when doing arithmetic so DST/UTC-offset never flips the date
-    const shiftDate = (dateStr, days) => {
-      const d = new Date(`${dateStr}T12:00:00Z`)
-      d.setUTCDate(d.getUTCDate() + days)
-      return d.toISOString().split('T')[0]
-    }
-    // Normalize: Supabase may return full ISO timestamp, grab just the date part
-    const dateOnly = expenseDate.split('T')[0]
-    if (t?.start_date && dateOnly < shiftDate(t.start_date, -BUFFER)) return false
-    if (t?.end_date   && dateOnly > shiftDate(t.end_date,   BUFFER))  return false
-    return true
-  }
 
   const fetchExpenses = async () => {
     const { data: e } = await supabase
@@ -96,17 +84,47 @@ export default function TripDetail() {
     setExpenses(e ?? [])
   }
 
+  // Re-pull the Plaid transactions currently assigned to this trip (source of truth).
+  const fetchTransactions = async () => {
+    const { data: x } = await supabase
+      .from('transactions').select('*').eq('trip_id', id).order('transaction_date', { ascending: false })
+    setTransactions(x ?? [])
+  }
+
   const handleSync = async () => {
     setSyncStatus('syncing')
     try {
       const res = await backendFetch(`/api/plaid/sync?trip_id=${id}`, { method: 'POST' })
       const result = await res.json()
-      console.log('[CampCost sync] fetched:', result.transactionsFetched, '| upserted:', result.expensesUpserted, '| skipped:', result.expensesSkipped)
-      await fetchExpenses()
+      console.log('[CampCost sync] fetched:', result.transactionsFetched, '| upserted:', result.expensesUpserted, '| removed:', result.expensesRemoved)
+      await Promise.all([fetchExpenses(), fetchTransactions()])
       setSyncStatus('done')
       setTimeout(() => setSyncStatus('idle'), 3000)
     } catch {
       setSyncStatus('idle')
+    }
+  }
+
+  // Plaid transactions are an immutable mirror — the browser can't write them (RLS).
+  // Re-assignment/review goes through the API. Passing tripId=null removes the
+  // transaction from this trip (unassign); passing this trip's id confirms it (reviewed=true).
+  const updateTransactionAssignment = async (txnId, tripId) => {
+    setTxnBusyId(txnId)
+    try {
+      const res = await backendFetch(`/api/transactions/${txnId}/assign`, {
+        method: 'PATCH',
+        body: JSON.stringify({ trip_id: tripId }),
+      })
+      if (res.ok) {
+        if (tripId === null) {
+          setTransactions(prev => prev.filter(t => t.id !== txnId)) // no longer on this trip
+        } else {
+          setTransactions(prev => prev.map(t => t.id === txnId ? { ...t, reviewed: true } : t))
+        }
+        setExpandedTxnId(null)
+      }
+    } finally {
+      setTxnBusyId(null)
     }
   }
 
@@ -202,7 +220,7 @@ export default function TripDetail() {
       try {
         setSyncStatus('syncing')
         await backendFetch(`/api/plaid/sync?trip_id=${id}`, { method: 'POST' })
-        await fetchExpenses()
+        await Promise.all([fetchExpenses(), fetchTransactions()])
         setSyncStatus('done')
         setTimeout(() => setSyncStatus('idle'), 3000)
       } catch {
@@ -217,23 +235,24 @@ export default function TripDetail() {
     setExpenses(prev => prev.filter(e => e.id !== expenseId))
   }
 
+  // Re-pull bank transactions. The old flow hard-deleted Plaid rows from `expenses` —
+  // but `transactions` is now the immutable source of truth and must NEVER be destroyed.
+  // Instead: reset the Plaid sync cursor (backend, RLS-safe) so the next sync re-pulls the
+  // full history, then run a trip-scoped sync that re-claims this trip's window. Dedup on
+  // plaid_transaction_id means nothing is duplicated and no stored transaction is lost.
   const resetTransactions = async () => {
     setResetting(true)
-    // Delete all Plaid-sourced expenses for this trip
-    await supabase.from('expenses').delete().eq('trip_id', id).eq('source', 'plaid')
-    // Null out the sync cursor so next sync fetches full 90-day history
-    await supabase.from('plaid_connections').update({ last_sync_at: null }).eq('user_id', user.id)
-    setShowResetConfirm(false)
-    // Fresh trip-specific sync so everything comes back on the right trip
     try {
       setSyncStatus('syncing')
+      await backendFetch('/api/plaid/reset-cursor', { method: 'POST' })
       await backendFetch(`/api/plaid/sync?trip_id=${id}`, { method: 'POST' })
-      await fetchExpenses()
+      await Promise.all([fetchExpenses(), fetchTransactions()])
       setSyncStatus('done')
       setTimeout(() => setSyncStatus('idle'), 3000)
     } catch {
       setSyncStatus('idle')
     }
+    setShowResetConfirm(false)
     setResetting(false)
   }
 
@@ -260,15 +279,30 @@ export default function TripDetail() {
 
   if (!trip) return <div style={{ padding: 32, textAlign: 'center', color: '#8b5e3c' }}>Trip not found.</div>
 
-  // Only count reviewed expenses that fall within the trip date range
-  const reviewedExpenses = expenses.filter(e => e.reviewed && isInRange(e.expense_date, trip))
-  const totalSpent = reviewedExpenses.reduce((s, e) => s + effectiveAmount(e), 0)
-  const unreviewedInRange = expenses.filter(e => !e.reviewed && isInRange(e.expense_date, trip))
-  const unreviewedTotal = unreviewedInRange.reduce((s, e) => s + effectiveAmount(e), 0)
+  // Spend mirrors the Dashboard's computation exactly:
+  //   Plaid transactions assigned to this trip (source of truth) — ALL of them count,
+  //   reviewed or not, since they're already scoped to the trip by trip_id.
+  //   Manual expenses count only once reviewed (honoring adjusted amounts, skipping $0 "skipped").
+  const reviewedManual = expenses.filter(e => e.reviewed !== false && e.adjustment_note !== 'skipped')
+  const plaidSpent = transactions.reduce((s, t) => s + Number(t.amount), 0)
+  const manualSpent = reviewedManual.reduce((s, e) => s + effectiveAmount(e), 0)
+  const totalSpent = plaidSpent + manualSpent
+
+  // Unreviewed Plaid transactions on this trip: auto-added and already counted, but the
+  // user hasn't confirmed they belong. Surfaced for review (confirm or remove).
+  const unreviewedTxns = transactions.filter(t => !t.reviewed)
+  const unreviewedTotal = unreviewedTxns.reduce((s, t) => s + Number(t.amount), 0)
+
   const totalBudget = Number(trip.total_budget) || 0
   const pct = totalBudget > 0 ? Math.min((totalSpent / totalBudget) * 100, 100) : 0
-  const spentByCategory = reviewedExpenses.reduce((acc, e) => {
-    acc[e.category] = (acc[e.category] || 0) + effectiveAmount(e); return acc
+
+  // Combined spend lines (Plaid + reviewed manual) drive the category + daily breakdowns.
+  const spendLines = [
+    ...transactions.map(t => ({ category: t.category, amount: Number(t.amount), date: t.transaction_date })),
+    ...reviewedManual.map(e => ({ category: e.category, amount: effectiveAmount(e), date: e.expense_date })),
+  ]
+  const spentByCategory = spendLines.reduce((acc, l) => {
+    acc[l.category] = (acc[l.category] || 0) + l.amount; return acc
   }, {})
   const nights = trip.start_date && trip.end_date
     ? Math.max(1, Math.round((new Date(trip.end_date) - new Date(trip.start_date)) / 86400000)) : null
@@ -276,7 +310,7 @@ export default function TripDetail() {
   const costPerMile = trip.total_miles ? (totalSpent / trip.total_miles).toFixed(2) : null
   const barColor = pct >= 90 ? '#d4622a' : pct >= 70 ? '#e07440' : '#2d5a27'
 
-  const unreviewedCount = unreviewedInRange.length
+  const unreviewedCount = unreviewedTxns.length
 
   const today = new Date()
   today.setHours(0, 0, 0, 0)
@@ -300,20 +334,40 @@ export default function TripDetail() {
     gear: '#9b7bb8', repairs: '#d4622a', misc: '#a89070',
   }
 
-  const filteredExpenses = expenses
-    .filter(e => e.adjustment_note !== 'skipped')
-    .filter(e => isInRange(e.expense_date, trip))
-    .filter(e => !filterCategory || e.category === filterCategory)
-    .filter(e => {
+  // Unified list: Plaid transactions + manual expenses in one feed. `source` drives the
+  // badge and which actions a row offers (Plaid → remove/confirm via API; manual → adjust).
+  const lineItems = [
+    ...transactions.map(t => ({
+      key: `t-${t.id}`, id: t.id, source: 'plaid',
+      date: t.transaction_date,
+      title: t.merchant_name || t.name || CATEGORY_LABELS[t.category] || 'Transaction',
+      searchText: `${t.merchant_name || ''} ${t.name || ''}`,
+      amount: Number(t.amount), original: Number(t.amount),
+      category: t.category, reviewed: t.reviewed, pending: t.pending,
+      adjusted: false, adjustmentNote: null, raw: t,
+    })),
+    ...expenses.filter(e => e.adjustment_note !== 'skipped').map(e => ({
+      key: `e-${e.id}`, id: e.id, source: 'manual',
+      date: e.expense_date,
+      title: e.note || CATEGORY_LABELS[e.category] || 'Expense',
+      searchText: `${e.merchant_name || ''} ${e.note || ''}`,
+      amount: effectiveAmount(e), original: Number(e.amount),
+      category: e.category, reviewed: e.reviewed !== false, pending: false,
+      adjusted: e.adjusted_amount != null, adjustmentNote: e.adjustment_note, raw: e,
+    })),
+  ]
+
+  const filteredItems = lineItems
+    .filter(it => !filterCategory || it.category === filterCategory)
+    .filter(it => {
       if (!filterSearch) return true
       const term = filterSearch.toLowerCase()
-      return (e.merchant_name || '').toLowerCase().includes(term) ||
-             (e.note || '').toLowerCase().includes(term)
+      return it.searchText.toLowerCase().includes(term) || it.title.toLowerCase().includes(term)
     })
     .sort((a, b) => {
-      if (filterSort === 'asc') return effectiveAmount(a) - effectiveAmount(b)
-      if (filterSort === 'desc') return effectiveAmount(b) - effectiveAmount(a)
-      return 0
+      if (filterSort === 'asc') return a.amount - b.amount
+      if (filterSort === 'desc') return b.amount - a.amount
+      return (b.date || '').localeCompare(a.date || '')
     })
 
   const donutData = Object.entries(spentByCategory)
@@ -321,8 +375,8 @@ export default function TripDetail() {
     .map(([cat, value]) => ({ name: CATEGORY_LABELS[cat] || cat, value: Number(value.toFixed(2)), cat }))
 
   const dailyData = Object.entries(
-    reviewedExpenses.reduce((acc, e) => {
-      acc[e.expense_date] = (acc[e.expense_date] || 0) + effectiveAmount(e)
+    spendLines.reduce((acc, l) => {
+      if (l.date) acc[l.date] = (acc[l.date] || 0) + l.amount
       return acc
     }, {})
   )
@@ -348,10 +402,10 @@ export default function TripDetail() {
         <div style={{ background: '#fdf6e8', border: '1px solid #e8d5b0', borderRadius: 14, padding: '14px 18px', marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
           <div>
             <p style={{ fontSize: 15, fontWeight: 700, color: '#4a3728', margin: 0 }}>
-              ${unreviewedTotal.toFixed(2)} pending review
+              ${unreviewedTotal.toFixed(2)} to review
             </p>
             <p style={{ fontSize: 12, color: '#8b5e3c', margin: '2px 0 0' }}>
-              {unreviewedCount} transaction{unreviewedCount !== 1 ? 's' : ''} not yet counted in totals
+              {unreviewedCount} bank transaction{unreviewedCount !== 1 ? 's' : ''} auto-added — confirm or remove
             </p>
           </div>
           <Link to={`/trips/${id}/review`} style={{
@@ -647,7 +701,7 @@ export default function TripDetail() {
       </div>
 
       {/* Charts */}
-      {expenses.length > 0 && (
+      {spendLines.length > 0 && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
 
           {/* Category donut */}
@@ -713,9 +767,9 @@ export default function TripDetail() {
 
         {showResetConfirm && (
           <div style={{ background: '#fff5f0', border: '1px solid #f5c5b0', borderRadius: 12, padding: '14px 16px', marginBottom: 16 }}>
-            <p style={{ fontSize: 13, fontWeight: 700, color: '#d4622a', margin: '0 0 4px' }}>Delete all Plaid transactions and re-import?</p>
+            <p style={{ fontSize: 13, fontWeight: 700, color: '#d4622a', margin: '0 0 4px' }}>Re-pull bank transactions?</p>
             <p style={{ fontSize: 12, color: '#8b5e3c', margin: '0 0 12px' }}>
-              Removes all bank-synced expenses for this trip, resets the sync cursor, then re-imports the last 90 days fresh. Manual cash entries are kept.
+              Resets the Plaid sync cursor and re-pulls your full history, then re-claims this trip's window. Nothing is deleted — stored transactions and manual cash entries are kept.
             </p>
             <div style={{ display: 'flex', gap: 8 }}>
               <button onClick={resetTransactions} disabled={resetting} style={{
@@ -723,7 +777,7 @@ export default function TripDetail() {
                 borderRadius: 10, padding: '9px', fontSize: 13, fontWeight: 600, cursor: 'pointer',
                 opacity: resetting ? 0.6 : 1
               }}>
-                {resetting ? 'Resetting...' : 'Yes, reset & re-import'}
+                {resetting ? 'Re-pulling...' : 'Yes, re-pull'}
               </button>
               <button onClick={() => setShowResetConfirm(false)} style={{
                 flex: 1, background: '#f5e6c8', color: '#8b5e3c', border: 'none',
@@ -764,7 +818,7 @@ export default function TripDetail() {
           </div>
         )}
 
-        {expenses.length > 0 && (
+        {lineItems.length > 0 && (
           <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
             <input
               type="text"
@@ -801,63 +855,119 @@ export default function TripDetail() {
           </div>
         )}
 
-        {expenses.length === 0 ? (
+        {lineItems.length === 0 ? (
           <p style={{ fontSize: 14, color: '#8b5e3c', textAlign: 'center', padding: '24px 0' }}>
             No expenses yet. Connect your bank or add cash purchases.
           </p>
-        ) : filteredExpenses.length === 0 ? (
+        ) : filteredItems.length === 0 ? (
           <p style={{ fontSize: 14, color: '#8b5e3c', textAlign: 'center', padding: '24px 0' }}>
             No expenses match your filters.
           </p>
         ) : (
           <div style={{ maxHeight: 600, overflowY: 'auto' }}>
             {(() => {
-              const reviewed = filteredExpenses.filter(e => e.reviewed)
-              const pending = filteredExpenses.filter(e => !e.reviewed)
-              const renderRow = (e, i, arr) => {
-                const adjusted = e.adjusted_amount != null
-                const displayed = effectiveAmount(e)
-                const isEditing = editingId === e.id
+              const reviewed = filteredItems.filter(it => it.reviewed)
+              const pending = filteredItems.filter(it => !it.reviewed)
+
+              const sourceBadge = (it) => (
+                it.source === 'plaid'
+                  ? <span style={{ fontSize: 11, background: '#e8f0e4', color: '#2d5a27', borderRadius: 6, padding: '1px 7px', fontWeight: 600 }}>Bank</span>
+                  : <span style={{ fontSize: 11, background: '#f5e6c8', color: '#8b5e3c', borderRadius: 6, padding: '1px 7px', fontWeight: 600 }}>Cash</span>
+              )
+
+              const renderRow = (it, i, arr) => {
+                const isEditing = it.source === 'manual' && editingId === it.id
+                const isExpanded = it.source === 'plaid' && expandedTxnId === it.id
+                const onRowClick = () => {
+                  if (it.source === 'manual') {
+                    isEditing ? setEditingId(null) : openEdit(it.raw)
+                  } else {
+                    setExpandedTxnId(isExpanded ? null : it.id)
+                  }
+                }
                 return (
-                <div key={e.id} style={{ borderBottom: i < arr.length - 1 ? '1px solid #f5e6c8' : 'none' }}>
+                <div key={it.key} style={{ borderBottom: i < arr.length - 1 ? '1px solid #f5e6c8' : 'none' }}>
                   {/* Row */}
                   <div
-                    onClick={() => isEditing ? setEditingId(null) : openEdit(e)}
+                    onClick={onRowClick}
                     style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 0', cursor: 'pointer' }}
                   >
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <p style={{ fontSize: 15, color: '#4a3728', margin: 0 }}>{e.merchant_name || e.note || CATEGORY_LABELS[e.category]}</p>
+                      <p style={{ fontSize: 15, color: '#4a3728', margin: 0 }}>{it.title}</p>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2, flexWrap: 'wrap' }}>
-                        <p style={{ fontSize: 12, color: '#8b5e3c', margin: 0 }}>{CATEGORY_LABELS[e.category]} · {e.expense_date}</p>
-                        {adjusted && (
+                        {sourceBadge(it)}
+                        <p style={{ fontSize: 12, color: '#8b5e3c', margin: 0 }}>{CATEGORY_LABELS[it.category] || it.category} · {it.date}</p>
+                        {it.pending && (
+                          <span style={{ fontSize: 11, background: '#fdf0d5', color: '#b07a2a', borderRadius: 6, padding: '1px 7px', fontWeight: 600 }}>Pending</span>
+                        )}
+                        {it.adjusted && (
                           <span style={{ fontSize: 11, background: '#f5e6c8', color: '#8b5e3c', borderRadius: 6, padding: '1px 7px', fontWeight: 600 }}>
-                            {e.adjustment_note || 'Adjusted'}
+                            {it.adjustmentNote || 'Adjusted'}
                           </span>
                         )}
                       </div>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginLeft: 12, flexShrink: 0 }}>
                       <div style={{ textAlign: 'right' }}>
-                        <p style={{ fontSize: 15, fontWeight: 700, color: '#4a3728', margin: 0 }}>${displayed.toFixed(2)}</p>
-                        {adjusted && (
+                        <p style={{ fontSize: 15, fontWeight: 700, color: '#4a3728', margin: 0 }}>${it.amount.toFixed(2)}</p>
+                        {it.adjusted && (
                           <p style={{ fontSize: 11, color: '#b0a090', margin: '1px 0 0', textDecoration: 'line-through' }}>
-                            ${Number(e.amount).toFixed(2)}
+                            ${it.original.toFixed(2)}
                           </p>
                         )}
                       </div>
+                      {/* × removes the row: hard-delete for manual, unassign-from-trip for Plaid */}
                       <button
-                        onClick={ev => { ev.stopPropagation(); deleteExpense(e.id) }}
-                        style={{ background: 'none', border: 'none', color: '#c4b5a5', fontSize: 18, cursor: 'pointer', padding: '0 2px', lineHeight: 1, flexShrink: 0 }}
-                        title="Delete expense"
+                        onClick={ev => {
+                          ev.stopPropagation()
+                          it.source === 'manual' ? deleteExpense(it.id) : updateTransactionAssignment(it.id, null)
+                        }}
+                        disabled={txnBusyId === it.id}
+                        style={{ background: 'none', border: 'none', color: '#c4b5a5', fontSize: 18, cursor: 'pointer', padding: '0 2px', lineHeight: 1, flexShrink: 0, opacity: txnBusyId === it.id ? 0.4 : 1 }}
+                        title={it.source === 'manual' ? 'Delete expense' : 'Remove from this trip'}
                       >×</button>
                     </div>
                   </div>
 
-                  {/* Inline edit panel */}
+                  {/* Plaid inline panel — immutable mirror, so no amount editing. Confirm or remove. */}
+                  {isExpanded && (
+                    <div style={{ background: '#fdf6e8', border: '1px solid #e8d5b0', borderRadius: 12, padding: 16, marginBottom: 12 }}>
+                      <p style={{ fontSize: 12, color: '#8b5e3c', margin: '0 0 10px', fontWeight: 600 }}>
+                        Bank transaction · ${it.amount.toFixed(2)} · {it.date}
+                        {it.reviewed ? ' · reviewed' : ''}
+                      </p>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        {!it.reviewed && (
+                          <button
+                            onClick={() => updateTransactionAssignment(it.id, id)}
+                            disabled={txnBusyId === it.id}
+                            style={{ flex: 1, background: '#2d5a27', color: 'white', border: 'none', borderRadius: 10, padding: '9px', fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: txnBusyId === it.id ? 0.6 : 1 }}
+                          >
+                            {txnBusyId === it.id ? 'Saving...' : 'Confirm ✓'}
+                          </button>
+                        )}
+                        <button
+                          onClick={() => updateTransactionAssignment(it.id, null)}
+                          disabled={txnBusyId === it.id}
+                          style={{ flex: 1, background: 'white', border: '1px solid #e8d5b0', color: '#8b5e3c', borderRadius: 10, padding: '9px', fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: txnBusyId === it.id ? 0.6 : 1 }}
+                        >
+                          Remove from trip
+                        </button>
+                        <button
+                          onClick={() => setExpandedTxnId(null)}
+                          style={{ flex: 1, background: '#f5e6c8', color: '#8b5e3c', border: 'none', borderRadius: 10, padding: '9px', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Manual inline edit panel (adjust flow) */}
                   {isEditing && (
                     <div style={{ background: '#fdf6e8', border: '1px solid #e8d5b0', borderRadius: 12, padding: 16, marginBottom: 12 }}>
                       <p style={{ fontSize: 12, color: '#8b5e3c', margin: '0 0 10px', fontWeight: 600 }}>
-                        Original: ${Number(e.amount).toFixed(2)} · {e.merchant_name || CATEGORY_LABELS[e.category]}
+                        Original: ${it.original.toFixed(2)} · {it.title}
                       </p>
 
                       {/* Quick preset buttons */}
@@ -867,10 +977,10 @@ export default function TripDetail() {
                             key={preset}
                             onClick={() => {
                               if (preset === 'Split 50/50') {
-                                setEditShare((Number(e.amount) / 2).toFixed(2))
+                                setEditShare((it.original / 2).toFixed(2))
                                 setEditNote('Split 50/50')
                               } else if (preset === 'Split 70/30') {
-                                setEditShare((Number(e.amount) * 0.7).toFixed(2))
+                                setEditShare((it.original * 0.7).toFixed(2))
                                 setEditNote('Split 70/30')
                               } else {
                                 setEditShare('0.00')
@@ -911,15 +1021,15 @@ export default function TripDetail() {
                       )}
                       <div style={{ display: 'flex', gap: 8 }}>
                         <button
-                          onClick={() => saveAdjustment(e)}
+                          onClick={() => saveAdjustment(it.raw)}
                           disabled={savingEdit}
                           style={{ flex: 1, background: '#2d5a27', color: 'white', border: 'none', borderRadius: 10, padding: '9px', fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: savingEdit ? 0.6 : 1 }}
                         >
                           {savingEdit ? 'Saving...' : 'Save'}
                         </button>
-                        {adjusted && (
+                        {it.adjusted && (
                           <button
-                            onClick={() => clearAdjustment(e)}
+                            onClick={() => clearAdjustment(it.raw)}
                             style={{ flex: 1, background: 'white', border: '1px solid #e8d5b0', color: '#8b5e3c', borderRadius: 10, padding: '9px', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}
                           >
                             Remove adjustment
@@ -939,7 +1049,7 @@ export default function TripDetail() {
               }
               return (
                 <>
-                  {reviewed.map((e, i) => renderRow(e, i, reviewed))}
+                  {reviewed.map((it, i) => renderRow(it, i, reviewed))}
                   {pending.length > 0 && (
                     <>
                       {reviewed.length > 0 && (
@@ -952,7 +1062,7 @@ export default function TripDetail() {
                           </span>
                         </div>
                       )}
-                      {pending.map((e, i) => renderRow(e, i, pending))}
+                      {pending.map((it, i) => renderRow(it, i, pending))}
                     </>
                   )}
                 </>

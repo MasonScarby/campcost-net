@@ -27,6 +27,22 @@ Preferred, not strict law — don't block future refactors over layering purity.
   date falls in `[start_date, end_date]`; `PATCH /api/transactions/{id}/assign` is the manual
   override (sets `reviewed=true` so auto-assign never moves it again). `reviewed=true` =
   user-confirmed; never auto-reassigned. `GET /api/transactions/unassigned` feeds the review queue.
+- **Client data flow**: the browser reads `transactions` directly (read-only RLS, migration 004)
+  for trip spend and review; every write goes through the API.
+  - `Dashboard.jsx` sums `transactions(amount)` (all assigned rows) + reviewed manual `expenses`.
+  - `TripDetail.jsx` shows a merged Plaid + manual feed. Spend matches the Dashboard: all assigned
+    transactions + reviewed manual expenses. Plaid rows are immutable — "remove from trip" =
+    `PATCH assign {trip_id:null}`, "confirm" = `PATCH assign {trip_id:this}`. The adjust/skip
+    (`adjusted_amount`) flow is manual-expense-only. The Expenses "Reset" button re-pulls via
+    `POST /api/plaid/reset-cursor` then `POST /api/plaid/sync?trip_id=` — it no longer deletes
+    anything.
+  - `TransactionReview.jsx` reviews this trip's unreviewed transactions: confirm =
+    `PATCH assign {trip_id:this}`, "not a trip expense" = `PATCH assign {trip_id:null}` (unassign,
+    not a $0 skip). Category is shown read-only (auto-derived; not browser-editable).
+- **`POST /api/plaid/reset-cursor`** clears `sync_cursor` on the user's connections so the next
+  sync re-pulls full Plaid history. UserId-filtered; never deletes stored transactions (dedup on
+  `plaid_transaction_id` prevents duplicates). Replaces the old client-side "delete plaid expenses
+  + null last_sync_at" reset.
 - Never duplicate pending + posted transactions
 - Budget must always be derived from source of truth — no stale cache. Caching only allowed for performance if invalidation is guaranteed.
 - All money uses `decimal` type
