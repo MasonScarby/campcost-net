@@ -27,6 +27,15 @@ public class BudgetCalculationServiceTests
         ExpenseDate = DateOnly.FromDateTime(DateTime.UtcNow)
     };
 
+    private static Transaction MakeTransaction(decimal amount, string category = "campground") => new()
+    {
+        Id = Guid.NewGuid(),
+        Amount = amount,
+        Category = category,
+        UserId = Guid.NewGuid(),
+        TransactionDate = DateOnly.FromDateTime(DateTime.UtcNow)
+    };
+
     private static BudgetCategory MakeBudgetCategory(string category, decimal planned) => new()
     {
         Id = Guid.NewGuid(),
@@ -46,6 +55,24 @@ public class BudgetCalculationServiceTests
 
         result.Spent.Should().Be(350m);
         result.MoneyLeft.Should().Be(650m);
+    }
+
+    [Fact]
+    public void Spent_SumsPlaidTransactionsAndManualExpenses()
+    {
+        // A trip's spend = Plaid transactions (source of truth) + manual expenses.
+        var trip = MakeTrip(1000m);
+        var spend = new ISpendLine[]
+        {
+            MakeTransaction(200m),   // Plaid
+            MakeTransaction(50m),    // Plaid
+            MakeExpense(75m),        // manual
+        };
+
+        var result = _sut.Calculate(trip, spend);
+
+        result.Spent.Should().Be(325m);
+        result.MoneyLeft.Should().Be(675m);
     }
 
     [Fact]
