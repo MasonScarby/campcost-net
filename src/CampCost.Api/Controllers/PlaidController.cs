@@ -3,8 +3,10 @@ using CampCost.Core.Interfaces;
 using CampCost.Infrastructure.Data;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace CampCost.Api.Controllers;
@@ -12,17 +14,27 @@ namespace CampCost.Api.Controllers;
 [ApiController]
 [Route("api/plaid")]
 [Authorize]
+[EnableRateLimiting("plaid-per-user")]
 public class PlaidController : ControllerBase
 {
     private readonly IPlaidService _plaid;
     private readonly ITransactionSyncService _sync;
+    private readonly IPlaidWebhookVerifier _webhookVerifier;
     private readonly CampCostDbContext _db;
+    private readonly ILogger<PlaidController> _logger;
 
-    public PlaidController(IPlaidService plaid, ITransactionSyncService sync, CampCostDbContext db)
+    public PlaidController(
+        IPlaidService plaid,
+        ITransactionSyncService sync,
+        IPlaidWebhookVerifier webhookVerifier,
+        CampCostDbContext db,
+        ILogger<PlaidController> logger)
     {
         _plaid = plaid;
         _sync = sync;
+        _webhookVerifier = webhookVerifier;
         _db = db;
+        _logger = logger;
     }
 
     private Guid UserId => Guid.Parse(
@@ -94,23 +106,57 @@ public class PlaidController : ControllerBase
     // POST /api/plaid/webhook
     // Receives push notifications from Plaid. Only acts on TRANSACTIONS webhooks.
     // Looks up the affected user by item_id and syncs only them.
+    //
+    // The endpoint is unauthenticated, so every request MUST carry a valid
+    // `Plaid-Verification` JWT (signed by Plaid, body hash bound) or it is rejected
+    // with 401 before anything is parsed or synced. The raw body is read manually
+    // because signature verification hashes the exact bytes Plaid sent.
     [HttpPost("webhook")]
     [AllowAnonymous]
-    public async Task<IActionResult> Webhook([FromBody] WebhookPayload? payload)
+    [EnableRateLimiting("webhook-per-ip")]
+    public async Task<IActionResult> Webhook()
     {
+        string rawBody;
+        using (var reader = new StreamReader(Request.Body))
+            rawBody = await reader.ReadToEndAsync();
+
+        var verificationJwt = Request.Headers["Plaid-Verification"].FirstOrDefault();
+        if (string.IsNullOrEmpty(verificationJwt) ||
+            !await _webhookVerifier.VerifyAsync(rawBody, verificationJwt))
+        {
+            _logger.LogWarning("Rejected Plaid webhook: missing or invalid Plaid-Verification signature");
+            return Unauthorized();
+        }
+
+        WebhookPayload? payload = null;
+        try
+        {
+            payload = JsonSerializer.Deserialize<WebhookPayload>(rawBody);
+        }
+        catch (JsonException)
+        {
+            // Signed-but-unparseable should never happen; acknowledge so Plaid doesn't retry forever.
+        }
+
         if (payload?.WebhookType != "TRANSACTIONS")
             return Ok(new { received = true });
 
-        // Unknown or missing item_id → acknowledge and do nothing. This endpoint is
-        // unauthenticated; it must NEVER fall back to syncing all users.
+        // Unknown or missing item_id → log, acknowledge, do nothing. This endpoint
+        // must NEVER fall back to syncing all users.
         if (payload.ItemId is null)
+        {
+            _logger.LogWarning("Plaid TRANSACTIONS webhook had no item_id — ignored");
             return Ok(new { received = true });
+        }
 
         var connection = await _db.PlaidConnections
             .FirstOrDefaultAsync(c => c.ItemId == payload.ItemId);
 
         if (connection is null)
+        {
+            _logger.LogWarning("Plaid webhook for unknown item_id {ItemId} — ignored", payload.ItemId);
             return Ok(new { received = true });
+        }
 
         await _sync.SyncForUserAsync(connection.UserId);
         return Ok(new { received = true });

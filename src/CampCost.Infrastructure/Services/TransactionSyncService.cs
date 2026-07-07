@@ -64,12 +64,6 @@ public class TransactionSyncService : ITransactionSyncService
         return await SyncConnectionsAsync(connections);
     }
 
-    public async Task<SyncResult> SyncAllAsync()
-    {
-        var connections = await _db.PlaidConnections.ToListAsync();
-        return await SyncConnectionsAsync(connections);
-    }
-
     /// <summary>
     /// Trip-specific sync: runs the normal cursor sync (new transactions inside this
     /// trip's window are routed to this trip), then reassigns any existing Plaid

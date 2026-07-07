@@ -1,8 +1,10 @@
 namespace CampCost.Core.Interfaces;
 
 /// <summary>
-/// Orchestrates a full transaction sync for one or all users.
+/// Orchestrates a full transaction sync for a user.
 /// Called from the controller for manual syncs and from the webhook handler for automated ones.
+/// There is deliberately NO sync-all-users operation: the webhook is unauthenticated,
+/// and an all-users sync reachable from it was a launch-blocking security hole.
 /// </summary>
 public interface ITransactionSyncService
 {
@@ -15,9 +17,6 @@ public interface ITransactionSyncService
     /// reassigning any that were previously routed to a different trip.
     /// </summary>
     Task<SyncResult> SyncForTripAsync(Guid userId, Guid tripId);
-
-    /// <summary>Sync all Plaid connections across all users (used by webhook).</summary>
-    Task<SyncResult> SyncAllAsync();
 }
 
 /// <summary>
