@@ -1,6 +1,9 @@
+using System.Security.Claims;
+using System.Threading.RateLimiting;
 using CampCost.Api.Middleware;
 using CampCost.Infrastructure;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 
@@ -10,17 +13,55 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddInfrastructure(builder.Configuration);
 
 // --- JWT auth: validates Supabase-issued RS256 tokens ---
+// Issuer and audience are pinned: a token from any other Supabase project (same
+// signing infra, different issuer) or with a non-user audience is rejected.
+var supabaseIssuer = builder.Configuration["Supabase:Url"] + "/auth/v1";
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
-        options.Authority = builder.Configuration["Supabase:Url"] + "/auth/v1";
+        options.Authority = supabaseIssuer;
         options.TokenValidationParameters = new TokenValidationParameters
         {
-            ValidateIssuer   = false,
-            ValidateAudience = false,
+            ValidateIssuer   = true,
+            ValidIssuer      = supabaseIssuer,
+            ValidateAudience = true,
+            ValidAudience    = "authenticated",
             ValidateLifetime = true
         };
     });
+
+// --- Rate limiting ---
+// plaid-per-user: 10 req/min per authenticated user on /api/plaid/* (Plaid calls are
+// expensive and hit our Plaid API quota). Unauthenticated requests bucket by IP —
+// they get rejected by auth anyway, but they must not bypass the limiter.
+// webhook-per-ip: 30 req/min per source IP on the unauthenticated webhook endpoint.
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    options.AddPolicy("plaid-per-user", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.User.FindFirstValue(ClaimTypes.NameIdentifier)
+                ?? context.User.FindFirstValue("sub")
+                ?? context.Connection.RemoteIpAddress?.ToString()
+                ?? "anonymous",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+
+    options.AddPolicy("webhook-per-ip", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 30,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+});
 
 // --- CORS: origins driven by config so production can inject the Vercel URL ---
 // Production env var: Cors__AllowedOrigins__0=https://your-app.vercel.app
@@ -74,9 +115,18 @@ app.UseMiddleware<ErrorHandlingMiddleware>();
 app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
-app.UseSwagger();
-app.UseSwaggerUI();
+// After UseAuthentication so the per-user policy can partition on the JWT subject.
+app.UseRateLimiter();
+
+// Swagger is a development tool only — never expose the API surface (or the
+// paste-your-JWT UI) in production.
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
 app.MapControllers();
-app.MapGet("/", () => Results.Redirect("/swagger/index.html"));
+app.MapGet("/", () => Results.Ok(new { status = "ok" }));
 
 app.Run();
