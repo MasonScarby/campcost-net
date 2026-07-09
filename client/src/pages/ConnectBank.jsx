@@ -4,6 +4,8 @@ import { usePlaidLink } from 'react-plaid-link'
 import { useAuth } from '../context/AuthContext'
 import { supabase } from '../lib/supabase'
 import { backendFetch } from '../lib/api'
+import { isBankReady } from '../lib/mfa'
+import MfaSetup from '../components/MfaSetup'
 
 // Group connections by institution, most recent first within each group
 function groupByInstitution(connections) {
@@ -32,6 +34,14 @@ export default function ConnectBank() {
   const [syncResult, setSyncResult] = useState(null)
   const [confirmDisconnect, setConfirmDisconnect] = useState(null) // connection id
   const [disconnecting, setDisconnecting] = useState(false)
+  const [syncWarning, setSyncWarning] = useState(null)
+  // 2FA gate: connecting a bank requires a verified TOTP factor + aal2 session.
+  // The server enforces this too (403 on token exchange) — this is just the UX.
+  const [mfaReady, setMfaReady] = useState(null) // null = checking | false | true
+
+  useEffect(() => {
+    isBankReady().then(setMfaReady).catch(() => setMfaReady(false))
+  }, [])
 
   const fetchConnections = () => {
     supabase
@@ -59,11 +69,13 @@ export default function ConnectBank() {
   const handleSync = async () => {
     setSyncStatus('syncing')
     setSyncResult(null)
+    setSyncWarning(null)
     try {
       const res = await backendFetch('/api/plaid/sync', { method: 'POST' })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || `Server error ${res.status}`)
       setSyncResult(data.synced)
+      setSyncWarning(data.warning ?? null)
       setSyncStatus('done')
       fetchConnections()
       setTimeout(() => setSyncStatus('idle'), 4000)
@@ -75,6 +87,7 @@ export default function ConnectBank() {
   }
 
   const getLinkToken = async () => {
+    if (mfaReady !== true) return // gated — MfaSetup must complete first
     setStatus('opening')
     setErrorMsg('')
     try {
@@ -120,6 +133,41 @@ export default function ConnectBank() {
   const grouped = groupByInstitution(connections)
   const institutions = Object.keys(grouped)
   const hasConnections = institutions.length > 0
+
+  // 2FA gate — bank connection is blocked until the session is aal2 with a verified TOTP factor
+  if (mfaReady !== true) {
+    return (
+      <div style={{ maxWidth: 480, margin: '0 auto', padding: '32px 16px' }}>
+        <button
+          onClick={() => navigate(-1)}
+          style={{ background: 'none', border: 'none', color: '#8b5e3c', fontSize: 14, cursor: 'pointer', marginBottom: 24, padding: 0 }}
+        >
+          ← Back
+        </button>
+        <div style={{ background: 'white', borderRadius: 16, border: '1px solid #e8d5b0', padding: 32 }}>
+          <div style={{ textAlign: 'center', marginBottom: 24 }}>
+            <div style={{
+              width: 56, height: 56, background: '#f5e6c8', borderRadius: 14,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 28, margin: '0 auto 12px'
+            }}>
+              🔐
+            </div>
+            <h1 style={{ fontSize: 20, fontWeight: 700, color: '#4a3728', margin: '0 0 6px' }}>
+              Two-factor authentication required
+            </h1>
+            <p style={{ fontSize: 14, color: '#8b5e3c', margin: 0 }}>
+              Because bank data is sensitive, you must secure your account with 2FA
+              before connecting a bank.
+            </p>
+          </div>
+          {mfaReady === null
+            ? <p style={{ fontSize: 13, color: '#8b5e3c', textAlign: 'center' }}>Checking 2FA status...</p>
+            : <MfaSetup onReady={() => setMfaReady(true)} />}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div style={{ maxWidth: 480, margin: '0 auto', padding: '32px 16px' }}>
@@ -293,6 +341,15 @@ export default function ConnectBank() {
                   : '★ Pro: auto-syncs within hours of purchase'}
               </p>
             </div>
+
+            {syncWarning && (
+              <p style={{
+                fontSize: 12, color: '#8a5a00', background: '#fff7e0',
+                border: '1px solid #f0dfae', borderRadius: 8, padding: '10px 14px', marginTop: 10
+              }}>
+                ⚠ {syncWarning}
+              </p>
+            )}
 
             <div style={{ height: 1, background: '#e8d5b0', margin: '20px 0' }} />
           </div>

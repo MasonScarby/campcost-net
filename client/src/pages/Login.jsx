@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
+import { getMfaStatus, verifyTotp } from '../lib/mfa'
 
 export default function Login() {
   const [email, setEmail] = useState('')
@@ -8,6 +9,9 @@ export default function Login() {
   const [isSignUp, setIsSignUp] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  // 2FA challenge step — shown when the account has a verified TOTP factor
+  const [mfaFactorId, setMfaFactorId] = useState(null)
+  const [mfaCode, setMfaCode] = useState('')
   const { signIn, signUp, signInWithGoogle } = useAuth()
   const navigate = useNavigate()
 
@@ -18,12 +22,80 @@ export default function Login() {
     const { error } = isSignUp
       ? await signUp(email, password)
       : await signIn(email, password)
-    setLoading(false)
     if (error) {
+      setLoading(false)
       setError(error.message)
-    } else {
-      navigate('/dashboard')
+      return
     }
+
+    // If the user has 2FA enrolled, require the TOTP challenge before continuing
+    try {
+      const { currentLevel, nextLevel, verifiedFactor } = await getMfaStatus()
+      if (nextLevel === 'aal2' && currentLevel !== 'aal2' && verifiedFactor) {
+        setMfaFactorId(verifiedFactor.id)
+        setLoading(false)
+        return
+      }
+    } catch {
+      // MFA status unavailable — proceed as normal (server still enforces aal2 for banking)
+    }
+
+    setLoading(false)
+    navigate('/dashboard')
+  }
+
+  const handleMfaSubmit = async (e) => {
+    e.preventDefault()
+    setError('')
+    setLoading(true)
+    try {
+      await verifyTotp(mfaFactorId, mfaCode)
+      navigate('/dashboard')
+    } catch (err) {
+      setError(err.message || 'Invalid code — try again.')
+    }
+    setLoading(false)
+  }
+
+  if (mfaFactorId) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#fdf6e8] px-4">
+        <div className="w-full max-w-sm">
+          <div className="text-center mb-8">
+            <h1 className="text-3xl font-bold text-[#2d5a27]">CampCost</h1>
+            <p className="text-[#8b5e3c] mt-1 text-sm">Two-factor authentication</p>
+          </div>
+          <div className="bg-white rounded-2xl border border-[#e8d5b0] shadow-sm" style={{ padding: '32px' }}>
+            <h2 className="font-semibold text-[#4a3728]" style={{ marginBottom: '8px' }}>Enter your code</h2>
+            <p className="text-[#8b5e3c] text-sm" style={{ marginBottom: '16px' }}>
+              Open your authenticator app and enter the 6-digit code.
+            </p>
+            <form onSubmit={handleMfaSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={6}
+                placeholder="000000"
+                value={mfaCode}
+                onChange={e => setMfaCode(e.target.value.replace(/\D/g, ''))}
+                autoFocus
+                className="w-full border border-[#e8d5b0] rounded-xl outline-none focus:border-[#2d5a27] transition-colors text-center"
+                style={{ padding: '12px 16px', fontSize: 18, letterSpacing: 6 }}
+              />
+              {error && <p className="text-[#d4622a] text-xs">{error}</p>}
+              <button
+                type="submit"
+                disabled={loading || mfaCode.length !== 6}
+                className="w-full bg-[#2d5a27] text-white rounded-xl text-sm font-medium hover:bg-[#3d7a36] disabled:opacity-50 transition-colors"
+                style={{ padding: '12px 16px' }}
+              >
+                {loading ? 'Verifying...' : 'Verify'}
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (
