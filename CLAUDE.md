@@ -107,11 +107,28 @@ Plaid returns date-only strings (no time). Server uses `DateTime.UtcNow`. For us
 - If a user has no planning/active trips, the sync STILL runs and stores everything unassigned; `SyncResult.Warning` just notes nothing was auto-assigned. No black hole, no data loss.
 - Trip-specific sync (`POST /api/plaid/sync?trip_id=`): runs the normal cursor sync routing in-window transactions to that trip, then claims existing unassigned / other-trip **non-reviewed** transactions in the trip window (start−2 … min(end+2, today), 90-day cap). Reviewed rows are never moved.
 - Assignment lives in `TransactionAssignmentService` (auto-assign on trip create/update via `TripController`; manual via `TransactionController`).
-- Free-tier 100-txn cap is not in main yet — a `TODO` in `TransactionSyncService` marks where to gate on the trip-ASSIGNED count (not the raw stored count) when it lands.
+- Free-tier 50-txn cap: enforced in `TransactionAssignmentService` (auto-assign + manual PATCH). The sync-time trip routing (`MatchTrip` during ingestion) is still UNCAPPED — a `TODO` in `TransactionSyncService` marks where to gate the assigned `trip_id` (never the insert itself; ingestion is never capped).
 - Dedup: global `plaid_transaction_id` unique index (migration 004) + in-memory lookup (including soft-deleted rows) prevents re-inserting
 
 ### Trip Matching Order
 `FindMatchingTrip` uses `FirstOrDefault` over trips ordered by `StartDate ASC`. If two trips overlap, earliest-starting trip wins. This is deterministic now — it wasn't before the `OrderBy` fix.
+
+## Monetization / Fraud Prevention
+
+| Rule | Where enforced | Notes |
+|---|---|---|
+| Plan source of truth = `subscriptions` table, read server-side by JWT UserId | `PlanService` (Infrastructure) via `IPlanService` | No row or non-active status → free. Client localStorage (`plan.js`) is display cache ONLY — never trusted |
+| Free plan: trips max 7 days (inclusive; exactly 7 allowed) | `PlanPolicy.IsTripDurationAllowed` + `TripController` POST/PUT `/api/trips` | Rejects with **402 Payment Required** + `code:"upgrade_required"`. PUT gates the RESULTING dates so trips can't be stretched field-by-field |
+| Free plan: max **50** transactions ASSIGNED per trip (`FreePlanLimits.MaxAssignedTransactionsPerTrip`) | `TransactionAssignmentService` — auto-assign (trip create/date change) AND manual `PATCH /api/transactions/{id}/assign` | Auto-assign fills remaining slots oldest-first, stops, returns `AutoAssignResult.Warning`; manual assign into a full trip → `AssignOutcome.CapReached` → 402. Existing assignments are NEVER removed to make room; unassign/re-confirm are never capped. Pro uncapped. Counts trip-ASSIGNED rows only — unassigned Plaid rows don't burn quota. Sync-time trip routing is still uncapped (TODO in `TransactionSyncService`) |
+| Trip create/update goes through the API, not direct Supabase inserts | `TripNew.jsx` → `POST /api/trips`, `TripDetail.jsx` date edits → `PUT /api/trips/{id}` | 402 shows upgrade CTA in the UI; POST also accepts `budgets` + `total_miles` so the client never inserts trips directly |
+| Client reads plan from `GET /api/account/plan` | `AccountController` + `fetchPlan()` in `client/src/lib/plan.js` | localStorage kept as display cache while the fetch is in flight |
+| 2FA (TOTP via Supabase Auth MFA): optional at signup, REQUIRED before connecting a bank | Client: `ConnectBank.jsx` gate (`isBankReady()` = verified TOTP factor + aal2). Server: `PlaidController.ExchangeToken` requires JWT `aal` claim == `aal2`, else **403 mfa_required** | Enroll/verify UI: `MfaSetup.jsx` (Account → Security + ConnectBank gate). Login challenge in `Login.jsx`. Helpers in `client/src/lib/mfa.js` |
+| Supabase dashboard prerequisite | — | MFA (TOTP) must be enabled in Supabase Auth settings for enrollment to work |
+
+Rules of thumb:
+- NEVER enforce plan limits client-side only — every limit needs a server check keyed off the JWT.
+- Plan rules live in `PlanPolicy`/`FreePlanLimits` (Core, pure, tested) — services call them, never duplicate the math.
+- Hitting a limit must never delete or mutate existing user data — reject/skip + surface a message.
 
 ## Environment Variables
 Load secrets via `dotnet user-secrets` locally, env vars in production. See `appsettings.json` for structure.

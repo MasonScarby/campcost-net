@@ -192,10 +192,12 @@ public class TransactionSyncService : ITransactionSyncService
                 // Dedup on plaid_transaction_id (includes soft-deleted rows)
                 if (existingByPlaidId.ContainsKey(tx.TransactionId)) { skipped++; continue; }
 
-                // TODO(free-tier cap): the fraud-prevention work caps free-plan users at
-                // 100 transactions. When that lands, gate the INSERT below on the user's
-                // trip-ASSIGNED transaction count (trip_id != null && deleted_at == null),
-                // NOT the raw stored count — unassigned Plaid rows must not burn the quota.
+                // TODO(free-tier cap): FreePlanLimits.MaxAssignedTransactionsPerTrip (50) is
+                // enforced in TransactionAssignmentService (auto-assign + manual PATCH), but
+                // THIS sync path still routes in-window transactions to a trip uncapped via
+                // MatchTrip. Storing the row is correct (ingestion is never capped); gate the
+                // trip_id it gets — count trip-ASSIGNED rows (trip_id != null, not deleted),
+                // never the raw stored count, and fall back to NULL when the trip is full.
 
                 var newRow = Build(connection, tx, MatchTrip(tx.Date, trips, targetTrip)?.Id);
                 _db.Transactions.Add(newRow);
