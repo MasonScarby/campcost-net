@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
-import { getPlan, FREE_TRIP_LIMIT } from '../lib/plan'
+import { getPlan, fetchPlan, FREE_TRIP_LIMIT } from '../lib/plan'
+import { backendFetch } from '../lib/api'
 
 const DEFAULT_BUDGETS = {
   fuel: 200,
@@ -47,9 +48,12 @@ export default function TripNew() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [tripCount, setTripCount] = useState(null)
-  const plan = getPlan()
+  const [upgradeRequired, setUpgradeRequired] = useState(false)
+  // Plan comes from the server (subscriptions table); getPlan() is only the display cache
+  const [plan, setPlanState] = useState(getPlan())
 
   useEffect(() => {
+    fetchPlan().then(setPlanState)
     supabase
       .from('trips')
       .select('id', { count: 'exact', head: true })
@@ -69,43 +73,46 @@ export default function TripNew() {
   const handleCreate = async () => {
     setLoading(true)
     setError('')
+    setUpgradeRequired(false)
 
-    const { data: tripData, error: tripError } = await supabase
-      .from('trips')
-      .insert({
-        user_id: user.id,
-        name: trip.name,
-        destination: trip.destination || null,
-        start_date: trip.start_date || null,
-        end_date: trip.end_date || null,
-        total_miles: trip.total_miles ? Number(trip.total_miles) : null,
-        total_budget: totalBudget,
-        status: 'planning',
+    // Trip creation goes through the API so the plan limits (e.g. the 7-day
+    // free-plan trip cap) are enforced server-side against the subscriptions table.
+    try {
+      const budgetAmounts = Object.fromEntries(
+        Object.entries(budgets).map(([cat, val]) => [cat, Number(val || 0)])
+      )
+
+      const res = await backendFetch('/api/trips', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: trip.name,
+          destination: trip.destination || null,
+          start_date: trip.start_date || null,
+          end_date: trip.end_date || null,
+          total_miles: trip.total_miles ? Number(trip.total_miles) : null,
+          status: 'planning',
+          budgets: budgetAmounts,
+        }),
       })
-      .select()
-      .single()
+      const data = await res.json()
 
-    if (tripError) {
-      setError(tripError.message)
+      if (res.status === 402) {
+        // Free plan limit hit — show the upgrade message from the server
+        setUpgradeRequired(true)
+        setError(data.error || 'Upgrade to Pro to create this trip.')
+        setLoading(false)
+        return
+      }
+      if (!res.ok) throw new Error(data.error || `Server error ${res.status}`)
+
       setLoading(false)
-      return
-    }
-
-    const catRows = Object.entries(budgets).map(([category, planned_amount]) => ({
-      trip_id: tripData.id,
-      category,
-      planned_amount: Number(planned_amount || 0),
-    }))
-
-    const { error: budgetError } = await supabase.from('budget_categories').insert(catRows)
-    if (budgetError) {
-      setError(budgetError.message)
+      // Response shape is { trip, transactions_assigned, warning } — the API also
+      // auto-assigns matching transactions, so TripDetail lands fully populated.
+      navigate(`/trips/${data.trip.id}`)
+    } catch (err) {
+      setError(err.message === 'Failed to fetch' ? 'Backend is not running.' : err.message)
       setLoading(false)
-      return
     }
-
-    setLoading(false)
-    navigate(`/trips/${tripData.id}`)
   }
 
   if (tripCount === null) return (
@@ -244,9 +251,16 @@ export default function TripNew() {
           </div>
 
           {error && (
-            <p style={{ color: '#d4622a', fontSize: 13, marginBottom: 12, padding: '10px 14px', background: '#fff5f0', borderRadius: 8 }}>
-              Error: {error}
-            </p>
+            <div style={{ marginBottom: 12, padding: '10px 14px', background: '#fff5f0', borderRadius: 8 }}>
+              <p style={{ color: '#d4622a', fontSize: 13, margin: 0 }}>
+                {upgradeRequired ? '🔒 ' : 'Error: '}{error}
+              </p>
+              {upgradeRequired && (
+                <Link to="/account" style={{ display: 'inline-block', marginTop: 8, fontSize: 13, fontWeight: 600, color: '#2d5a27' }}>
+                  Upgrade to Pro — $6/mo →
+                </Link>
+              )}
+            </div>
           )}
 
           <button

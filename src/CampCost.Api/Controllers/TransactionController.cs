@@ -1,4 +1,5 @@
 using CampCost.Core.Interfaces;
+using CampCost.Core.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using System.Security.Claims;
@@ -52,12 +53,21 @@ public class TransactionController : ControllerBase
     // PATCH /api/transactions/{id}/assign
     // Manual override: body { "trip_id": "<guid>" } assigns; { "trip_id": null } unassigns.
     // Marks the transaction reviewed so auto-assign won't move it again.
+    // Free-plan trips are capped at 50 assigned transactions → 402 when the cap is reached.
     [HttpPatch("{id:guid}/assign")]
     public async Task<IActionResult> Assign(Guid id, [FromBody] AssignRequest req)
     {
-        var ok = await _assignment.AssignAsync(UserId, id, req.TripId);
-        if (!ok) return NotFound(new { error = "Transaction or target trip not found for this user." });
-        return Ok(new { success = true, transaction_id = id, trip_id = req.TripId });
+        var outcome = await _assignment.AssignAsync(UserId, id, req.TripId);
+        return outcome switch
+        {
+            AssignOutcome.NotFound => NotFound(new { error = "Transaction or target trip not found for this user." }),
+            AssignOutcome.CapReached => StatusCode(StatusCodes.Status402PaymentRequired, new
+            {
+                error = FreePlanLimits.TransactionCapWarning,
+                code = "upgrade_required"
+            }),
+            _ => Ok(new { success = true, transaction_id = id, trip_id = req.TripId })
+        };
     }
 }
 

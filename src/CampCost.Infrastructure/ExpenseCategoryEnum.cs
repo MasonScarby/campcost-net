@@ -9,6 +9,7 @@ public enum ExpenseCategoryEnum
     fuel,
     campground,
     food_groceries,
+    dump_station,
     gear,
     repairs,
     propane_utilities,

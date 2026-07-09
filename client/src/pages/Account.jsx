@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { supabase } from '../lib/supabase'
-import { getPlan, setPlan, FREE_TRIP_LIMIT } from '../lib/plan'
+import { getPlan, setPlan, fetchPlan, FREE_TRIP_LIMIT } from '../lib/plan'
 
 import { backendFetch } from '../lib/api'
+import MfaSetup from '../components/MfaSetup'
 
 function groupByInstitution(connections) {
   const map = {}
@@ -29,6 +30,12 @@ export default function Account() {
   const [syncResult, setSyncResult] = useState(null)
   const [plan, setPlanState] = useState(getPlan)
   const [unassigned, setUnassigned] = useState([])
+  const [assignError, setAssignError] = useState('')
+
+  // Server is the source of truth for the plan; localStorage is just a display cache
+  useEffect(() => {
+    fetchPlan().then(setPlanState)
+  }, [])
 
   const fetchUnassigned = async () => {
     try {
@@ -39,13 +46,22 @@ export default function Account() {
 
   const assignTransaction = async (txId, tripId) => {
     if (!tripId) return
+    setAssignError('')
     const res = await backendFetch(`/api/transactions/${txId}/assign`, {
       method: 'PATCH',
       body: JSON.stringify({ trip_id: tripId }),
     })
-    if (res.ok) setUnassigned(prev => prev.filter(t => t.id !== txId))
+    if (res.ok) {
+      setUnassigned(prev => prev.filter(t => t.id !== txId))
+    } else {
+      // 402 = free-plan trip already holds 50 assigned transactions
+      const data = await res.json().catch(() => ({}))
+      setAssignError(data.error || `Could not assign (server error ${res.status})`)
+    }
   }
 
+  // Dev-only display toggle — enforcement is server-side (subscriptions table),
+  // so flipping this only changes what the UI shows, never what the API allows.
   const togglePlan = () => {
     const next = plan === 'free' ? 'pro' : 'free'
     setPlan(next)
@@ -148,6 +164,12 @@ export default function Account() {
             </button>
           </>
         )}
+      </div>
+
+      {/* Security — 2FA (required before connecting a bank) */}
+      <div style={{ background: 'white', borderRadius: 16, border: '1px solid #e8d5b0', padding: 20, marginBottom: 12 }}>
+        <h2 style={{ fontSize: 15, fontWeight: 600, color: '#4a3728', marginBottom: 12 }}>Security</h2>
+        <MfaSetup />
       </div>
 
       {/* Connected banks */}
@@ -259,6 +281,11 @@ export default function Account() {
           <p style={{ fontSize: 12, color: '#8b5e3c', marginBottom: 12 }}>
             {unassigned.length} transaction{unassigned.length !== 1 ? 's' : ''} not tied to a trip. Assign them so they count toward a trip's spend.
           </p>
+          {assignError && (
+            <p style={{ fontSize: 12, color: '#8a5a00', background: '#fff7e0', border: '1px solid #f0dfae', borderRadius: 8, padding: '10px 14px', marginBottom: 12 }}>
+              ⚠ {assignError}
+            </p>
+          )}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {unassigned.map(t => (
               <div key={t.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, background: '#f9f5ee', borderRadius: 10, padding: '8px 12px' }}>

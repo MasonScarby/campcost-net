@@ -34,6 +34,7 @@ public class CampCostDbContext : DbContext
             e.Property(t => t.StartDate).HasColumnName("start_date");
             e.Property(t => t.EndDate).HasColumnName("end_date");
             e.Property(t => t.TotalBudget).HasColumnName("total_budget");
+            e.Property(t => t.TotalMiles).HasColumnName("total_miles");
             e.Property(t => t.Status).HasColumnName("status");
             e.Property(t => t.CreatedAt).HasColumnName("created_at");
         });
@@ -161,7 +162,8 @@ public class CampCostDbContext : DbContext
             e.Property(s => s.UserId).HasColumnName("user_id");
             e.Property(s => s.Plan).HasColumnName("plan");
             e.Property(s => s.Status).HasColumnName("status");
-            e.Property(s => s.CreatedAt).HasColumnName("created_at");
+            // NOTE: the subscriptions table has updated_at, not created_at (see 001_init.sql)
+            e.Property(s => s.UpdatedAt).HasColumnName("updated_at");
         });
     }
 }

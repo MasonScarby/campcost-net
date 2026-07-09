@@ -57,6 +57,16 @@ public class PlaidController : ControllerBase
     [HttpPost("exchange-token")]
     public async Task<IActionResult> ExchangeToken([FromBody] ExchangeRequest req)
     {
+        // Defense in depth: connecting a bank requires 2FA. Supabase stamps the JWT with
+        // aal2 only after a verified MFA challenge — never trust the client gate alone.
+        // Checked before any Plaid call so an un-stepped-up session never reaches Plaid.
+        if (!string.Equals(User.FindFirstValue("aal"), "aal2", StringComparison.OrdinalIgnoreCase))
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                error = "Two-factor authentication is required before connecting a bank account.",
+                code = "mfa_required"
+            });
+
         if (string.IsNullOrWhiteSpace(req.PublicToken))
             return BadRequest(new { error = "public_token is missing from request body" });
 

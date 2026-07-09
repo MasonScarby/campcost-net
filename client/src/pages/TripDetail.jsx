@@ -30,6 +30,7 @@ export default function TripDetail() {
   const [cashNote, setCashNote] = useState('')
   const [addingCash, setAddingCash] = useState(false)
   const [syncStatus, setSyncStatus] = useState('idle') // idle | syncing | done
+  const [capWarning, setCapWarning] = useState(null) // free-plan 50-txn assignment cap hit
   const [editingId, setEditingId] = useState(null)
   const [editShare, setEditShare] = useState('')
   const [editNote, setEditNote] = useState('')
@@ -40,6 +41,7 @@ export default function TripDetail() {
   const [editingDates, setEditingDates] = useState(false)
   const [dateForm, setDateForm] = useState({ start_date: '', end_date: '' })
   const [savingDates, setSavingDates] = useState(false)
+  const [dateError, setDateError] = useState('')
 
   // Reset transactions
   const [showResetConfirm, setShowResetConfirm] = useState(false)
@@ -122,6 +124,10 @@ export default function TripDetail() {
           setTransactions(prev => prev.map(t => t.id === txnId ? { ...t, reviewed: true } : t))
         }
         setExpandedTxnId(null)
+      } else if (res.status === 402) {
+        // Free-plan trip already holds 50 assigned transactions — surface the upgrade nudge
+        const data = await res.json().catch(() => ({}))
+        setCapWarning(data.error || 'Free plan transaction limit reached — upgrade for unlimited.')
       }
     } finally {
       setTxnBusyId(null)
@@ -209,10 +215,30 @@ export default function TripDetail() {
 
   const saveDates = async () => {
     setSavingDates(true)
-    const { error } = await supabase.from('trips').update({
-      start_date: dateForm.start_date || null,
-      end_date: dateForm.end_date || null,
-    }).eq('id', id)
+    setDateError('')
+    // Goes through the API (not direct Supabase) so the free-plan 7-day trip limit
+    // is enforced server-side — a 402 means "upgrade to Pro". The API also re-runs
+    // auto-assign for the new window and reports the 50-txn cap via `warning`.
+    let error = null
+    try {
+      const res = await backendFetch(`/api/trips/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          start_date: dateForm.start_date || null,
+          end_date: dateForm.end_date || null,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setDateError(data.error || `Server error ${res.status}`)
+        error = data
+      } else {
+        setCapWarning(data.warning ?? null)
+      }
+    } catch (err) {
+      setDateError(err.message === 'Failed to fetch' ? 'Backend is not running.' : err.message)
+      error = err
+    }
     if (!error) {
       setTrip(prev => ({ ...prev, start_date: dateForm.start_date || null, end_date: dateForm.end_date || null }))
       setEditingDates(false)
@@ -434,10 +460,19 @@ export default function TripDetail() {
             <span style={{ fontSize: 14 }}>↻</span>
             {syncStatus === 'syncing' ? 'Checking...' : 'Check for new transactions'}
           </button>
-          {syncStatus === 'done' && (
+          {syncStatus === 'done' && !capWarning && (
             <span style={{ fontSize: 12, color: '#2d5a27', fontWeight: 600 }}>Up to date</span>
           )}
         </div>
+      )}
+
+      {capWarning && (
+        <p style={{
+          fontSize: 12, color: '#8a5a00', background: '#fff7e0',
+          border: '1px solid #f0dfae', borderRadius: 8, padding: '10px 14px', marginBottom: 16
+        }}>
+          ⚠ {capWarning}
+        </p>
       )}
 
       {/* Summary */}
@@ -529,6 +564,11 @@ export default function TripDetail() {
                       style={{ width: '100%', border: '1px solid #e8d5b0', borderRadius: 10, padding: '8px 10px', fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
                   </div>
                 </div>
+                {dateError && (
+                  <p style={{ color: '#d4622a', fontSize: 12, margin: 0, padding: '8px 10px', background: '#fff5f0', borderRadius: 8 }}>
+                    {dateError}
+                  </p>
+                )}
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button onClick={saveDates} disabled={savingDates}
                     style={{ flex: 1, background: '#2d5a27', color: 'white', border: 'none', borderRadius: 10, padding: '8px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: savingDates ? 0.6 : 1 }}>
