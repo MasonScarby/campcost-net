@@ -55,10 +55,14 @@ export default function Dashboard() {
       // Trip spend now comes from two sources:
       //   transactions = Plaid mirror (source of truth), assigned to this trip
       //   expenses     = manual entries only, going forward
+      // Embedded filter drops soft-deleted Plaid rows from the sums (Plaid `removed`
+      // deltas set deleted_at; the backend hides them via EF query filter, the browser
+      // must do it explicitly). Filtering the embed never hides the parent trip.
       const { data, error } = await supabase
         .from('trips')
         .select('*, expenses(amount, adjusted_amount, reviewed), transactions(amount, reviewed)')
         .eq('user_id', user.id)
+        .is('transactions.deleted_at', null)
         .order('created_at', { ascending: false })
       if (!error) setTrips(data ?? [])
       setLoading(false)

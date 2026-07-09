@@ -25,9 +25,13 @@ export default function TransactionReview() {
     // (read-only RLS); confirm/remove writes go through the assign API. No client-side date
     // filtering is needed — the backend already scoped these to the trip by trip_id.
     const fetchUnreviewed = async () => {
+      // Explicit columns, NOT select('*'): migration 004 grants column-level SELECT only,
+      // and PostgREST expands * to ungranted columns → permission denied → empty queue.
+      // deleted_at filter mirrors the backend's soft-delete query filter.
       const { data: txns } = await supabase
-        .from('transactions').select('*')
-        .eq('trip_id', id).eq('reviewed', false)
+        .from('transactions')
+        .select('id, trip_id, amount, transaction_date, merchant_name, name, category, pending, reviewed, deleted_at')
+        .eq('trip_id', id).eq('reviewed', false).is('deleted_at', null)
         .order('transaction_date', { ascending: false })
 
       setUnreviewed(txns ?? [])

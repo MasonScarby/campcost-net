@@ -14,6 +14,11 @@ const CATEGORY_LABELS = {
 
 const card = { background: 'white', borderRadius: 16, border: '1px solid #e8d5b0', padding: 20, marginBottom: 12 }
 
+// Explicit column list for browser reads of `transactions`. Migration 004 revoked table-wide
+// SELECT and re-granted only safe columns, so select('*') = permission denied (PostgREST
+// expands * to every column). Keep this in sync with the grant in 005_fix_client_reads.sql.
+const TXN_COLUMNS = 'id, trip_id, amount, transaction_date, merchant_name, name, category, pending, reviewed, deleted_at'
+
 export default function TripDetail() {
   const { id } = useParams()
   const { user } = useAuth()
@@ -67,7 +72,11 @@ export default function TripDetail() {
         supabase.from('expenses').select('*').eq('trip_id', id).order('expense_date', { ascending: false }),
         // transactions = Plaid mirror (source of truth) assigned to this trip.
         // Browser has read-only RLS access; all writes go through the API.
-        supabase.from('transactions').select('*').eq('trip_id', id).order('transaction_date', { ascending: false }),
+        // NEVER select('*') here: migration 004 grants column-level SELECT, and PostgREST
+        // expands * to ALL columns (incl. ungranted plaid_transaction_id etc.), which fails
+        // the whole query with permission denied — the trip then renders $0 / empty.
+        // deleted_at filter mirrors the backend's soft-delete query filter.
+        supabase.from('transactions').select(TXN_COLUMNS).eq('trip_id', id).is('deleted_at', null).order('transaction_date', { ascending: false }),
         supabase.from('trip_stops').select('*').eq('trip_id', id).order('arrival_date', { ascending: true }),
       ])
       setTrip(t)
@@ -87,9 +96,10 @@ export default function TripDetail() {
   }
 
   // Re-pull the Plaid transactions currently assigned to this trip (source of truth).
+  // Explicit columns + deleted_at filter — see TXN_COLUMNS comment for why * breaks.
   const fetchTransactions = async () => {
     const { data: x } = await supabase
-      .from('transactions').select('*').eq('trip_id', id).order('transaction_date', { ascending: false })
+      .from('transactions').select(TXN_COLUMNS).eq('trip_id', id).is('deleted_at', null).order('transaction_date', { ascending: false })
     setTransactions(x ?? [])
   }
 
@@ -187,12 +197,10 @@ export default function TripDetail() {
   const addStop = async () => {
     if (!stopForm.location.trim()) return
     setSavingStop(true)
-    const nights = stopForm.arrival_date && stopForm.departure_date
-      ? Math.max(0, Math.round((new Date(stopForm.departure_date) - new Date(stopForm.arrival_date)) / 86400000))
-      : null
+    // No user_id column on trip_stops — ownership is derived through the trip by RLS
+    // ("Users own their stops" joins trips.user_id). Sending user_id fails the insert.
     const { data, error } = await supabase.from('trip_stops').insert({
       trip_id: id,
-      user_id: user.id,
       location: stopForm.location.trim(),
       type: stopForm.type,
       arrival_date: stopForm.arrival_date || null,
