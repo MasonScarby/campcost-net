@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { supabase } from '../lib/supabase'
-import { getPlan, fetchPlan, FREE_TRIP_LIMIT } from '../lib/plan'
+import { getPlan, setPlan, fetchPlan, FREE_TRIP_LIMIT } from '../lib/plan'
 
 import { backendFetch } from '../lib/api'
 import MfaSetup from '../components/MfaSetup'
@@ -61,6 +61,7 @@ export default function Account() {
   }
 
   const [planBusy, setPlanBusy] = useState(false)
+  const [planError, setPlanError] = useState('')
 
   // DEV-ONLY plan toggle. Until Stripe lands (FIXES.md #9) there's no real upgrade path,
   // so flip the `subscriptions` row directly — this is the SERVER source of truth that
@@ -75,6 +76,7 @@ export default function Account() {
   const togglePlan = async () => {
     if (planBusy) return
     setPlanBusy(true)
+    setPlanError('')
     const next = plan === 'free' ? 'pro' : 'free'
     const { error } = await supabase
       .from('subscriptions')
@@ -83,12 +85,15 @@ export default function Account() {
         { onConflict: 'user_id' }
       )
     if (error) {
-      console.error('plan toggle failed:', error)
+      // Surface it — a silent failure looked like "upgrade does nothing".
+      setPlanError(`Couldn't change plan: ${error.message}`)
       setPlanBusy(false)
       return
     }
-    // Re-read from the server so the UI reflects the persisted source of truth.
-    setPlanState(await fetchPlan())
+    // The row is written (server source of truth), so set the plan optimistically —
+    // don't gate the click on a backend round-trip that could be down or slow.
+    setPlan(next)
+    setPlanState(next)
     setPlanBusy(false)
   }
 
@@ -163,6 +168,11 @@ export default function Account() {
             {plan === 'pro' ? 'Pro' : 'Free'}
           </span>
         </div>
+        {planError && (
+          <p style={{ fontSize: 12, color: '#d4622a', background: '#fff5f0', borderRadius: 8, padding: '8px 12px', margin: '0 0 10px' }}>
+            {planError}
+          </p>
+        )}
         {plan === 'free' ? (
           <>
             <p style={{ fontSize: 13, color: '#8b5e3c', marginBottom: 14 }}>
