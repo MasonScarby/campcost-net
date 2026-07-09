@@ -11,4 +11,11 @@ public interface IPlanService
     /// row or the subscription is not active (cancelled / past_due).
     /// </summary>
     Task<string> GetPlanAsync(Guid userId);
+
+    /// <summary>
+    /// Upserts the user's subscription to the given plan (status "active").
+    /// DEV-ONLY entry point today — in production the real plan write comes from the
+    /// Stripe webhook (service role). Callers must gate access (see AccountController).
+    /// </summary>
+    Task SetPlanAsync(Guid userId, string plan);
 }

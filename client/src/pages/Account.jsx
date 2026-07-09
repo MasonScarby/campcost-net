@@ -64,37 +64,35 @@ export default function Account() {
   const [planError, setPlanError] = useState('')
 
   // DEV-ONLY plan toggle. Until Stripe lands (FIXES.md #9) there's no real upgrade path,
-  // so flip the `subscriptions` row directly — this is the SERVER source of truth that
-  // PlanService reads, so the change persists. Writing localStorage alone no longer works:
-  // every page runs fetchPlan() on mount, which reads the server and overwrites the cache
-  // back to 'free' (that's why the old toggle "stopped switching over").
-  //
-  // SECURITY — must change before real users: a user must NOT be able to self-upgrade.
-  // When Stripe lands, move the plan write to the Stripe webhook (service role), and
-  // revoke the browser's insert/update on `subscriptions` (RLS currently allows own-row
-  // writes). This client write is acceptable only for local dev.
+  // so hit the dev-only POST /api/account/plan, which upserts the `subscriptions` row
+  // (the SERVER source of truth PlanService reads) as a privileged role. The browser
+  // never writes `subscriptions` — that endpoint 404s outside Development, so this can't
+  // be used to self-upgrade in production. Writing localStorage alone no longer works:
+  // every page runs fetchPlan() on mount and would overwrite the cache back to the
+  // server's value (that's why the old localStorage-only toggle "stopped switching over").
   const togglePlan = async () => {
     if (planBusy) return
     setPlanBusy(true)
     setPlanError('')
     const next = plan === 'free' ? 'pro' : 'free'
-    const { error } = await supabase
-      .from('subscriptions')
-      .upsert(
-        { user_id: user.id, plan: next, status: 'active', updated_at: new Date().toISOString() },
-        { onConflict: 'user_id' }
-      )
-    if (error) {
-      // Surface it — a silent failure looked like "upgrade does nothing".
-      setPlanError(`Couldn't change plan: ${error.message}`)
+    try {
+      const res = await backendFetch('/api/account/plan', {
+        method: 'POST',
+        body: JSON.stringify({ plan: next }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setPlanError(`Couldn't change plan: ${data.error || `server error ${res.status}`}`)
+        return
+      }
+      // Server persisted it — set the plan optimistically (no second round-trip).
+      setPlan(next)
+      setPlanState(next)
+    } catch (err) {
+      setPlanError(err.message === 'Failed to fetch' ? 'Backend is not running.' : err.message)
+    } finally {
       setPlanBusy(false)
-      return
     }
-    // The row is written (server source of truth), so set the plan optimistically —
-    // don't gate the click on a backend round-trip that could be down or slow.
-    setPlan(next)
-    setPlanState(next)
-    setPlanBusy(false)
   }
 
   const fetchConnections = async () => {
