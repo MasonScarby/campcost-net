@@ -1,0 +1,12 @@
+#!/bin/sh
+# Enforce WORKFLOW.md rule 1: no direct commits to main.
+# Merge commits are allowed (that's Mason's approved-merge path); regular
+# hand-commits on main are blocked. Override once with: git commit --no-verify
+branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+if [ "$branch" = "main" ] && [ ! -f "$(git rev-parse --git-dir)/MERGE_HEAD" ]; then
+  echo "✗ Blocked: direct commit to main (WORKFLOW.md rule 1)."
+  echo "  Work on a branch:  git switch -c fix/your-thing"
+  echo "  Intentional merge/override:  git commit --no-verify"
+  exit 1
+fi
+exit 0
