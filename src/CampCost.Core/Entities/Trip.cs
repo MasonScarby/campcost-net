@@ -14,6 +14,7 @@ public class Trip
     public DateOnly? StartDate { get; set; }   // nullable — user may not have set dates
     public DateOnly? EndDate { get; set; }
     public decimal TotalBudget { get; set; }
+    public decimal? TotalMiles { get; set; }
     public string Status { get; set; } = "planning";
     public DateTime CreatedAt { get; set; }
 

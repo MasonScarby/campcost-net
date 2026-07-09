@@ -46,6 +46,7 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<IPlaidWebhookVerifier, PlaidWebhookVerifier>();
 
         // Scoped services (one per HTTP request)
+        services.AddScoped<IPlanService, PlanService>();
         services.AddScoped<IPlaidService, PlaidService>();
         services.AddScoped<ITransactionSyncService, TransactionSyncService>();
         services.AddScoped<ITransactionAssignmentService, TransactionAssignmentService>();
