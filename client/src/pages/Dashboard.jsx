@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
-import { getPlan, FREE_TRIP_LIMIT } from '../lib/plan'
+import { getPlan, fetchPlan, FREE_TRIP_LIMIT } from '../lib/plan'
 
 const STATUS_COLORS = {
   planning: { background: '#f5e6c8', color: '#8b5e3c' },
@@ -43,7 +43,9 @@ export default function Dashboard() {
   )
   const [editingFunds, setEditingFunds] = useState(false)
   const [fundsInput, setFundsInput] = useState('')
-  const plan = getPlan()
+  // Plan comes from the server (subscriptions table); getPlan() is the display cache
+  const [plan, setPlanState] = useState(getPlan())
+  useEffect(() => { fetchPlan().then(setPlanState) }, [])
   const [showLimitMsg, setShowLimitMsg] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState(null)
   const [deleting, setDeleting] = useState(false)
