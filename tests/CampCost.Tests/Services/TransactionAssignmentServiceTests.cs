@@ -1,4 +1,5 @@
 using CampCost.Core.Entities;
+using CampCost.Core.Interfaces;
 using CampCost.Infrastructure.Data;
 using CampCost.Infrastructure.Services;
 using FluentAssertions;
@@ -24,7 +25,9 @@ public class TransactionAssignmentServiceTests
         _db = new CampCostDbContext(new DbContextOptionsBuilder<CampCostDbContext>()
             .UseInMemoryDatabase(Guid.NewGuid().ToString())
             .Options);
-        _sut = new TransactionAssignmentService(_db, NullLogger<TransactionAssignmentService>.Instance);
+        // Pro plan here so these existing (non-cap) tests aren't affected by the free-plan cap.
+        _sut = new TransactionAssignmentService(
+            _db, new FixedPlanService("pro"), NullLogger<TransactionAssignmentService>.Instance);
     }
 
     private Trip SeedTrip(int startDaysAgo = 10, int endDaysAgo = 0)
@@ -72,9 +75,9 @@ public class TransactionAssignmentServiceTests
         var otherTrip = Guid.NewGuid();
         SeedTx("other-trip", tripId: otherTrip, daysAgo: 5); // never stolen
 
-        var count = await _sut.AutoAssignForTripAsync(_userId, trip.Id);
+        var result = await _sut.AutoAssignForTripAsync(_userId, trip.Id);
 
-        count.Should().Be(1);
+        result.Assigned.Should().Be(1);
         (await _db.Transactions.SingleAsync(t => t.PlaidTransactionId == "in-range")).TripId.Should().Be(trip.Id);
         (await _db.Transactions.SingleAsync(t => t.PlaidTransactionId == "out-of-range")).TripId.Should().BeNull();
         (await _db.Transactions.SingleAsync(t => t.PlaidTransactionId == "other-trip")).TripId.Should().Be(otherTrip);
@@ -86,9 +89,9 @@ public class TransactionAssignmentServiceTests
         var trip = SeedTrip(startDaysAgo: 10, endDaysAgo: 0);
         SeedTx("reviewed-unassigned", tripId: null, daysAgo: 5, reviewed: true);
 
-        var count = await _sut.AutoAssignForTripAsync(_userId, trip.Id);
+        var result = await _sut.AutoAssignForTripAsync(_userId, trip.Id);
 
-        count.Should().Be(0);
+        result.Assigned.Should().Be(0);
         (await _db.Transactions.SingleAsync()).TripId.Should().BeNull("reviewed = user-confirmed, never auto-moved");
     }
 
@@ -100,9 +103,9 @@ public class TransactionAssignmentServiceTests
         await _db.SaveChangesAsync();
         SeedTx("tx", tripId: null, daysAgo: 5);
 
-        var count = await _sut.AutoAssignForTripAsync(_userId, trip.Id);
+        var result = await _sut.AutoAssignForTripAsync(_userId, trip.Id);
 
-        count.Should().Be(0);
+        result.Assigned.Should().Be(0);
     }
 
     [Fact]
@@ -111,9 +114,9 @@ public class TransactionAssignmentServiceTests
         var trip = SeedTrip();
         var tx = SeedTx("tx", tripId: null, daysAgo: 5);
 
-        var ok = await _sut.AssignAsync(_userId, tx.Id, trip.Id);
+        var outcome = await _sut.AssignAsync(_userId, tx.Id, trip.Id);
 
-        ok.Should().BeTrue();
+        outcome.Should().Be(AssignOutcome.Success);
         var updated = await _db.Transactions.SingleAsync();
         updated.TripId.Should().Be(trip.Id);
         updated.Reviewed.Should().BeTrue();
@@ -125,9 +128,9 @@ public class TransactionAssignmentServiceTests
         var trip = SeedTrip();
         var tx = SeedTx("tx", tripId: trip.Id, daysAgo: 5);
 
-        var ok = await _sut.AssignAsync(_userId, tx.Id, null);
+        var outcome = await _sut.AssignAsync(_userId, tx.Id, null);
 
-        ok.Should().BeTrue();
+        outcome.Should().Be(AssignOutcome.Success);
         (await _db.Transactions.SingleAsync()).TripId.Should().BeNull();
     }
 
@@ -137,9 +140,9 @@ public class TransactionAssignmentServiceTests
         var trip = SeedTrip();
         var tx = SeedTx("tx", tripId: null, daysAgo: 5);
 
-        var ok = await _sut.AssignAsync(Guid.NewGuid(), tx.Id, trip.Id);
+        var outcome = await _sut.AssignAsync(Guid.NewGuid(), tx.Id, trip.Id);
 
-        ok.Should().BeFalse();
+        outcome.Should().Be(AssignOutcome.NotFound);
     }
 
     [Fact]

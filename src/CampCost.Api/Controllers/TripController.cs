@@ -18,21 +18,52 @@ public class TripController : ControllerBase
     private readonly CampCostDbContext _db;
     private readonly BudgetCalculationService _budget;
     private readonly ITransactionAssignmentService _assignment;
+    private readonly IPlanService _plans;
 
     public TripController(
         CampCostDbContext db,
         BudgetCalculationService budget,
-        ITransactionAssignmentService assignment)
+        ITransactionAssignmentService assignment,
+        IPlanService plans)
     {
         _db = db;
         _budget = budget;
         _assignment = assignment;
+        _plans = plans;
+    }
+
+    // Free plan: reject trips longer than 7 days (exactly 7 allowed). 402 upgrade_required.
+    private async Task<IActionResult?> EnforceTripDurationAsync(DateOnly? start, DateOnly? end)
+    {
+        var plan = await _plans.GetPlanAsync(UserId);
+        if (PlanPolicy.IsTripDurationAllowed(plan, start, end)) return null;
+        return StatusCode(StatusCodes.Status402PaymentRequired, new
+        {
+            error = PlanPolicy.TripDurationUpgradeMessage,
+            code = "upgrade_required"
+        });
     }
 
     private Guid UserId => Guid.Parse(
         User.FindFirstValue(ClaimTypes.NameIdentifier)
         ?? User.FindFirstValue("sub")
         ?? throw new UnauthorizedAccessException("No user ID in token"));
+
+    // Budget category keys must match the Postgres expense_category enum exactly
+    // (case-sensitive) or the insert would fail at the DB layer with an opaque error.
+    private static bool TryValidateCategories(Dictionary<string, decimal> budgets, out string? badCategory)
+    {
+        foreach (var key in budgets.Keys)
+        {
+            if (!Enum.TryParse<Infrastructure.ExpenseCategoryEnum>(key, ignoreCase: false, out _))
+            {
+                badCategory = key;
+                return false;
+            }
+        }
+        badCategory = null;
+        return true;
+    }
 
     // GET /api/trips
     // Returns all trips for the current user, ordered by start date
@@ -53,6 +84,13 @@ public class TripController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> CreateTrip([FromBody] TripWriteRequest req)
     {
+        // Server-side plan gate: free-plan trips are capped at 7 days.
+        var gate = await EnforceTripDurationAsync(req.StartDate, req.EndDate);
+        if (gate is not null) return gate;
+
+        if (req.Budgets is not null && !TryValidateCategories(req.Budgets, out var badCategory))
+            return BadRequest(new { error = $"unknown budget category '{badCategory}'" });
+
         var trip = new Trip
         {
             Id = Guid.NewGuid(),
@@ -61,15 +99,30 @@ public class TripController : ControllerBase
             Destination = req.Destination,
             StartDate = req.StartDate,
             EndDate = req.EndDate,
-            TotalBudget = req.TotalBudget ?? 0,
+            // per-category budgets win over total_budget so the sum can't drift from the rows
+            TotalBudget = req.Budgets?.Values.Sum() ?? req.TotalBudget ?? 0,
+            TotalMiles = req.TotalMiles,
             Status = req.Status ?? "planning",
             CreatedAt = DateTime.UtcNow
         };
         _db.Trips.Add(trip);
+
+        foreach (var (category, planned) in req.Budgets ?? new Dictionary<string, decimal>())
+        {
+            _db.BudgetCategories.Add(new BudgetCategory
+            {
+                Id = Guid.NewGuid(),
+                TripId = trip.Id,
+                Category = category,
+                PlannedAmount = planned,
+                CreatedAt = DateTime.UtcNow
+            });
+        }
+
         await _db.SaveChangesAsync();
 
         var assigned = await _assignment.AutoAssignForTripAsync(UserId, trip.Id);
-        return Ok(new { trip, transactions_assigned = assigned });
+        return Ok(new { trip, transactions_assigned = assigned.Assigned, warning = assigned.Warning });
     }
 
     // PUT /api/trips/{id}
@@ -81,17 +134,24 @@ public class TripController : ControllerBase
         var trip = await _db.Trips.FirstOrDefaultAsync(t => t.Id == id && t.UserId == UserId);
         if (trip is null) return NotFound();
 
+        // Gate the RESULTING dates so a free trip can't be stretched past 7 days.
+        var newStart = req.StartDate ?? trip.StartDate;
+        var newEnd = req.EndDate ?? trip.EndDate;
+        var gate = await EnforceTripDurationAsync(newStart, newEnd);
+        if (gate is not null) return gate;
+
         if (req.Name is not null) trip.Name = req.Name;
         trip.Destination = req.Destination ?? trip.Destination;
-        trip.StartDate = req.StartDate ?? trip.StartDate;
-        trip.EndDate = req.EndDate ?? trip.EndDate;
+        trip.StartDate = newStart;
+        trip.EndDate = newEnd;
         if (req.TotalBudget.HasValue) trip.TotalBudget = req.TotalBudget.Value;
+        if (req.TotalMiles.HasValue) trip.TotalMiles = req.TotalMiles;
         if (req.Status is not null) trip.Status = req.Status;
 
         await _db.SaveChangesAsync();
 
         var assigned = await _assignment.AutoAssignForTripAsync(UserId, trip.Id);
-        return Ok(new { trip, transactions_assigned = assigned });
+        return Ok(new { trip, transactions_assigned = assigned.Assigned, warning = assigned.Warning });
     }
 
     // GET /api/trips/{id}/budget
@@ -169,11 +229,15 @@ public class TripController : ControllerBase
     }
 }
 
+// `budgets` maps expense_category → planned amount (e.g. { "fuel": 200 }); when present on
+// create, total_budget is derived from its sum so the two can't drift apart.
 public record TripWriteRequest(
     [property: JsonPropertyName("name")] string? Name,
     [property: JsonPropertyName("destination")] string? Destination,
     [property: JsonPropertyName("start_date")] DateOnly? StartDate,
     [property: JsonPropertyName("end_date")] DateOnly? EndDate,
     [property: JsonPropertyName("total_budget")] decimal? TotalBudget,
-    [property: JsonPropertyName("status")] string? Status
+    [property: JsonPropertyName("total_miles")] decimal? TotalMiles,
+    [property: JsonPropertyName("status")] string? Status,
+    [property: JsonPropertyName("budgets")] Dictionary<string, decimal>? Budgets
 );
