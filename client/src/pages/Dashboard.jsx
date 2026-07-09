@@ -55,14 +55,16 @@ export default function Dashboard() {
       // Trip spend now comes from two sources:
       //   transactions = Plaid mirror (source of truth), assigned to this trip
       //   expenses     = manual entries only, going forward
-      // Embedded filter drops soft-deleted Plaid rows from the sums (Plaid `removed`
-      // deltas set deleted_at; the backend hides them via EF query filter, the browser
-      // must do it explicitly). Filtering the embed never hides the parent trip.
+      // Pull deleted_at with the embedded transactions and exclude soft-deleted rows
+      // in JS (see totalSpent). Do NOT filter the embed server-side
+      // (`transactions.deleted_at=is.null`): PostgREST can treat a filter on an embedded
+      // resource as an inner join, which DROPS trips that have zero transactions — i.e.
+      // every newly created trip disappears from the list. Filtering in JS never hides
+      // a parent trip.
       const { data, error } = await supabase
         .from('trips')
-        .select('*, expenses(amount, adjusted_amount, reviewed), transactions(amount, reviewed)')
+        .select('*, expenses(amount, adjusted_amount, reviewed), transactions(amount, reviewed, deleted_at)')
         .eq('user_id', user.id)
-        .is('transactions.deleted_at', null)
         .order('created_at', { ascending: false })
       if (!error) setTrips(data ?? [])
       setLoading(false)
@@ -96,9 +98,11 @@ export default function Dashboard() {
     const manual = (trip.expenses ?? [])
       .filter(e => e.reviewed !== false)
       .reduce((sum, e) => sum + (e.adjusted_amount != null ? Number(e.adjusted_amount) : Number(e.amount)), 0)
-    // Plaid transactions assigned to this trip (source of truth). Soft-deleted rows are
-    // excluded server-side; the authoritative figure is /api/trips/{id}/budget.
+    // Plaid transactions assigned to this trip (source of truth). Exclude soft-deleted
+    // rows in JS (Plaid `removed` deltas set deleted_at); the authoritative figure is
+    // /api/trips/{id}/budget.
     const plaid = (trip.transactions ?? [])
+      .filter(t => !t.deleted_at)
       .reduce((sum, t) => sum + Number(t.amount), 0)
     return manual + plaid
   }

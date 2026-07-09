@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { supabase } from '../lib/supabase'
-import { getPlan, setPlan, fetchPlan, FREE_TRIP_LIMIT } from '../lib/plan'
+import { getPlan, fetchPlan, FREE_TRIP_LIMIT } from '../lib/plan'
 
 import { backendFetch } from '../lib/api'
 import MfaSetup from '../components/MfaSetup'
@@ -60,12 +60,36 @@ export default function Account() {
     }
   }
 
-  // Dev-only display toggle — enforcement is server-side (subscriptions table),
-  // so flipping this only changes what the UI shows, never what the API allows.
-  const togglePlan = () => {
+  const [planBusy, setPlanBusy] = useState(false)
+
+  // DEV-ONLY plan toggle. Until Stripe lands (FIXES.md #9) there's no real upgrade path,
+  // so flip the `subscriptions` row directly — this is the SERVER source of truth that
+  // PlanService reads, so the change persists. Writing localStorage alone no longer works:
+  // every page runs fetchPlan() on mount, which reads the server and overwrites the cache
+  // back to 'free' (that's why the old toggle "stopped switching over").
+  //
+  // SECURITY — must change before real users: a user must NOT be able to self-upgrade.
+  // When Stripe lands, move the plan write to the Stripe webhook (service role), and
+  // revoke the browser's insert/update on `subscriptions` (RLS currently allows own-row
+  // writes). This client write is acceptable only for local dev.
+  const togglePlan = async () => {
+    if (planBusy) return
+    setPlanBusy(true)
     const next = plan === 'free' ? 'pro' : 'free'
-    setPlan(next)
-    setPlanState(next)
+    const { error } = await supabase
+      .from('subscriptions')
+      .upsert(
+        { user_id: user.id, plan: next, status: 'active', updated_at: new Date().toISOString() },
+        { onConflict: 'user_id' }
+      )
+    if (error) {
+      console.error('plan toggle failed:', error)
+      setPlanBusy(false)
+      return
+    }
+    // Re-read from the server so the UI reflects the persisted source of truth.
+    setPlanState(await fetchPlan())
+    setPlanBusy(false)
   }
 
   const fetchConnections = async () => {
@@ -144,11 +168,12 @@ export default function Account() {
             <p style={{ fontSize: 13, color: '#8b5e3c', marginBottom: 14 }}>
               {loading ? '...' : `${activeTrips} / ${FREE_TRIP_LIMIT} trip${FREE_TRIP_LIMIT !== 1 ? 's' : ''}`} · manual sync only
             </p>
-            <button onClick={togglePlan} style={{
+            <button onClick={togglePlan} disabled={planBusy} style={{
               background: '#2d5a27', color: 'white', border: 'none',
-              borderRadius: 12, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer'
+              borderRadius: 12, padding: '10px 18px', fontSize: 13, fontWeight: 600,
+              cursor: planBusy ? 'not-allowed' : 'pointer', opacity: planBusy ? 0.6 : 1
             }}>
-              Upgrade to Pro — $6/mo
+              {planBusy ? 'Upgrading…' : 'Upgrade to Pro — $6/mo'}
             </button>
           </>
         ) : (
@@ -156,11 +181,12 @@ export default function Account() {
             <p style={{ fontSize: 13, color: '#8b5e3c', marginBottom: 14 }}>
               Unlimited trips · auto-sync · PDF export · cost stats
             </p>
-            <button onClick={togglePlan} style={{
+            <button onClick={togglePlan} disabled={planBusy} style={{
               background: 'none', border: '1px solid #e8d5b0', color: '#8b5e3c',
-              borderRadius: 12, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer'
+              borderRadius: 12, padding: '10px 18px', fontSize: 13, fontWeight: 600,
+              cursor: planBusy ? 'not-allowed' : 'pointer', opacity: planBusy ? 0.6 : 1
             }}>
-              Switch to Free (dev)
+              {planBusy ? 'Switching…' : 'Switch to Free (dev)'}
             </button>
           </>
         )}
