@@ -146,6 +146,37 @@ public class TransactionAssignmentServiceTests
     }
 
     [Fact]
+    public async Task ManualAssign_WithCategory_AppliesUserCorrection()
+    {
+        var trip = SeedTrip();
+        var tx = SeedTx("recategorize", tripId: null, daysAgo: 5);
+
+        var outcome = await _sut.AssignAsync(_userId, tx.Id, trip.Id, category: "fuel");
+
+        outcome.Should().Be(AssignOutcome.Success);
+        var updated = await _db.Transactions.SingleAsync();
+        updated.Category.Should().Be("fuel");
+        updated.Reviewed.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ManualAssign_UnknownCategory_RejectsWithoutSideEffects()
+    {
+        var trip = SeedTrip();
+        var tx = SeedTx("bad-category", tripId: null, daysAgo: 5);
+        var originalCategory = tx.Category;
+
+        var outcome = await _sut.AssignAsync(_userId, tx.Id, trip.Id, category: "not_a_category");
+
+        outcome.Should().Be(AssignOutcome.InvalidCategory);
+        // Nothing half-applied: category, assignment, and reviewed all untouched.
+        var unchanged = await _db.Transactions.SingleAsync();
+        unchanged.Category.Should().Be(originalCategory);
+        unchanged.TripId.Should().BeNull();
+        unchanged.Reviewed.Should().BeFalse();
+    }
+
+    [Fact]
     public async Task GetUnassigned_ReturnsOnlyNullTripNonDeleted()
     {
         SeedTx("unassigned", tripId: null, daysAgo: 1);

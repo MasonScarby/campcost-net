@@ -52,15 +52,18 @@ public class TransactionController : ControllerBase
 
     // PATCH /api/transactions/{id}/assign
     // Manual override: body { "trip_id": "<guid>" } assigns; { "trip_id": null } unassigns.
-    // Marks the transaction reviewed so auto-assign won't move it again.
+    // Optional "category" corrects the auto-derived category during review (must match
+    // the expense_category enum exactly). Marks the transaction reviewed so auto-assign
+    // won't move it again.
     // Free-plan trips are capped at 50 assigned transactions → 402 when the cap is reached.
     [HttpPatch("{id:guid}/assign")]
     public async Task<IActionResult> Assign(Guid id, [FromBody] AssignRequest req)
     {
-        var outcome = await _assignment.AssignAsync(UserId, id, req.TripId);
+        var outcome = await _assignment.AssignAsync(UserId, id, req.TripId, req.Category);
         return outcome switch
         {
             AssignOutcome.NotFound => NotFound(new { error = "Transaction or target trip not found for this user." }),
+            AssignOutcome.InvalidCategory => BadRequest(new { error = $"unknown category '{req.Category}'" }),
             AssignOutcome.CapReached => StatusCode(StatusCodes.Status402PaymentRequired, new
             {
                 error = FreePlanLimits.TransactionCapWarning,
@@ -72,5 +75,6 @@ public class TransactionController : ControllerBase
 }
 
 public record AssignRequest(
-    [property: JsonPropertyName("trip_id")] Guid? TripId
+    [property: JsonPropertyName("trip_id")] Guid? TripId,
+    [property: JsonPropertyName("category")] string? Category = null
 );

@@ -29,8 +29,11 @@ public interface ITransactionAssignmentService
     /// transaction (or target trip) isn't owned by the user, <see cref="AssignOutcome.CapReached"/>
     /// when a free-plan trip is already at the assignment cap, otherwise
     /// <see cref="AssignOutcome.Success"/>. Passing a null tripId unassigns (never capped).
+    /// An optional category corrects the auto-derived one during review — it's OUR derived
+    /// field, not immutable Plaid data (amount/date/merchant stay untouchable). An unknown
+    /// category returns <see cref="AssignOutcome.InvalidCategory"/> and changes nothing.
     /// </summary>
-    Task<AssignOutcome> AssignAsync(Guid userId, Guid transactionId, Guid? tripId);
+    Task<AssignOutcome> AssignAsync(Guid userId, Guid transactionId, Guid? tripId, string? category = null);
 
     /// <summary>The user's stored, non-deleted transactions with no trip assigned (review queue).</summary>
     Task<IReadOnlyList<Transaction>> GetUnassignedAsync(Guid userId);
@@ -44,5 +47,6 @@ public enum AssignOutcome
 {
     Success,
     NotFound,
-    CapReached
+    CapReached,
+    InvalidCategory
 }

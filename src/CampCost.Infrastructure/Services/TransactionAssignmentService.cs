@@ -96,8 +96,13 @@ public class TransactionAssignmentService : ITransactionAssignmentService
         return new AutoAssignResult(toAssign.Count, warning);
     }
 
-    public async Task<AssignOutcome> AssignAsync(Guid userId, Guid transactionId, Guid? tripId)
+    public async Task<AssignOutcome> AssignAsync(Guid userId, Guid transactionId, Guid? tripId, string? category = null)
     {
+        // Validate the category BEFORE any other checks so a bad value can never
+        // half-apply (case-sensitive: must match the Postgres expense_category enum).
+        if (category is not null && !Enum.TryParse<ExpenseCategoryEnum>(category, ignoreCase: false, out _))
+            return AssignOutcome.InvalidCategory;
+
         var tx = await _db.Transactions
             .FirstOrDefaultAsync(t => t.Id == transactionId && t.UserId == userId);
         if (tx is null) return AssignOutcome.NotFound;
@@ -125,6 +130,8 @@ public class TransactionAssignmentService : ITransactionAssignmentService
 
         tx.TripId = tripId;
         tx.Reviewed = true; // user-confirmed — auto-assign must not move it again
+        if (category is not null)
+            tx.Category = category; // user correction of the auto-derived category
         tx.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync();
         return AssignOutcome.Success;
