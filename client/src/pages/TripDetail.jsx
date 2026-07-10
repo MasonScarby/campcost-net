@@ -57,11 +57,32 @@ export default function TripDetail() {
   const [filterCategory, setFilterCategory] = useState('')
   const [filterSort, setFilterSort] = useState('')
 
+  // In-window transactions living elsewhere (other trips or unassigned). Reviewed rows
+  // are never auto-moved, so without this list a transaction reviewed onto an overlapping
+  // trip is invisible from this one forever — manual "Move here" is the only escape hatch.
+  const [windowTxns, setWindowTxns] = useState([])
+  const [tripNames, setTripNames] = useState({})
+
   // Campground stops
   const [stops, setStops] = useState([])
   const [showAddStop, setShowAddStop] = useState(false)
   const [stopForm, setStopForm] = useState({ location: '', type: 'campground', arrival_date: '', departure_date: '', cost_per_night: '', notes: '' })
   const [savingStop, setSavingStop] = useState(false)
+
+  // In-window transactions NOT on this trip (other trips or unassigned, incl. reviewed).
+  // The .or() is needed because trip_id.neq alone excludes NULLs in SQL.
+  const fetchWindowTxns = async (start, end) => {
+    const [{ data: others }, { data: allTrips }] = await Promise.all([
+      supabase.from('transactions').select(TXN_COLUMNS)
+        .gte('transaction_date', start).lte('transaction_date', end)
+        .is('deleted_at', null)
+        .or(`trip_id.neq.${id},trip_id.is.null`)
+        .order('transaction_date', { ascending: false }),
+      supabase.from('trips').select('id, name').eq('user_id', user.id),
+    ])
+    setWindowTxns(others ?? [])
+    setTripNames(Object.fromEntries((allTrips ?? []).map(t => [t.id, t.name])))
+  }
 
   useEffect(() => {
     const fetchAll = async () => {
@@ -84,10 +105,35 @@ export default function TripDetail() {
       setExpenses(e ?? [])
       setTransactions(x ?? [])
       setStops(s ?? [])
+      if (t?.start_date && t?.end_date) {
+        await fetchWindowTxns(t.start_date, t.end_date)
+      }
       setLoading(false)
     }
     fetchAll()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, user.id])
+
+  // Pull an elsewhere-living transaction onto THIS trip. Manual assign may move
+  // reviewed rows (only AUTO-assign must respect them); marks reviewed on the way.
+  const claimTransaction = async (txn) => {
+    setTxnBusyId(txn.id)
+    try {
+      const res = await backendFetch(`/api/transactions/${txn.id}/assign`, {
+        method: 'PATCH',
+        body: JSON.stringify({ trip_id: id }),
+      })
+      if (res.ok) {
+        setWindowTxns(prev => prev.filter(t => t.id !== txn.id))
+        setTransactions(prev => [{ ...txn, trip_id: id, reviewed: true }, ...prev])
+      } else if (res.status === 402) {
+        const data = await res.json().catch(() => ({}))
+        setCapWarning(data.error || 'Free plan transaction limit reached — upgrade for unlimited.')
+      }
+    } finally {
+      setTxnBusyId(null)
+    }
+  }
 
   const fetchExpenses = async () => {
     const { data: e } = await supabase
@@ -129,7 +175,11 @@ export default function TripDetail() {
       })
       if (res.ok) {
         if (tripId === null) {
-          setTransactions(prev => prev.filter(t => t.id !== txnId)) // no longer on this trip
+          // No longer on this trip — surface it in the "other transactions" list so it
+          // stays reachable (it's reviewed now, so auto-assign will never reclaim it).
+          const removed = transactions.find(t => t.id === txnId)
+          setTransactions(prev => prev.filter(t => t.id !== txnId))
+          if (removed) setWindowTxns(prev => [{ ...removed, trip_id: null, reviewed: true }, ...prev])
         } else {
           setTransactions(prev => prev.map(t => t.id === txnId ? { ...t, reviewed: true } : t))
         }
@@ -1248,6 +1298,51 @@ export default function TripDetail() {
           </div>
         )}
       </div>
+
+      {/* Other transactions in this trip's date range — on other trips or unassigned.
+          Reviewed rows are never auto-moved, so this is the only place they can be
+          pulled into an overlapping trip. */}
+      {windowTxns.length > 0 && (
+        <div style={card}>
+          <h2 style={{ fontSize: 17, fontWeight: 600, color: '#4a3728', margin: '0 0 4px' }}>
+            Other transactions in this date range
+          </h2>
+          <p style={{ fontSize: 12, color: '#8b5e3c', margin: '0 0 12px' }}>
+            {windowTxns.length} transaction{windowTxns.length !== 1 ? 's' : ''} from your bank in this window that {windowTxns.length !== 1 ? 'are' : 'is'} on another trip or unassigned.
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 1, maxHeight: 400, overflowY: 'auto' }}>
+            {windowTxns.map((t, i) => (
+              <div key={t.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '10px 0', borderBottom: i < windowTxns.length - 1 ? '1px solid #f5e6c8' : 'none' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <p style={{ fontSize: 14, color: '#4a3728', margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {t.merchant_name || t.name || CATEGORY_LABELS[t.category] || 'Transaction'}
+                  </p>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                    <span style={{
+                      fontSize: 11, borderRadius: 6, padding: '1px 7px', fontWeight: 600,
+                      background: t.trip_id ? '#ede4f5' : '#f5e6c8',
+                      color: t.trip_id ? '#7a5c99' : '#8b5e3c',
+                    }}>
+                      {t.trip_id ? (tripNames[t.trip_id] || 'Another trip') : 'Unassigned'}
+                    </span>
+                    <span style={{ fontSize: 12, color: '#8b5e3c' }}>{t.transaction_date}</span>
+                  </div>
+                </div>
+                <span style={{ fontSize: 14, fontWeight: 700, color: '#4a3728', flexShrink: 0 }}>
+                  ${effectiveAmount(t).toFixed(2)}
+                </span>
+                <button
+                  onClick={() => claimTransaction(t)}
+                  disabled={txnBusyId === t.id}
+                  style={{ background: '#2d5a27', color: 'white', border: 'none', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer', flexShrink: 0, opacity: txnBusyId === t.id ? 0.6 : 1 }}
+                >
+                  {txnBusyId === t.id ? '...' : 'Move here'}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   )
