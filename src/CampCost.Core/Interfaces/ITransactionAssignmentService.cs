@@ -37,6 +37,13 @@ public interface ITransactionAssignmentService
 
     /// <summary>The user's stored, non-deleted transactions with no trip assigned (review queue).</summary>
     Task<IReadOnlyList<Transaction>> GetUnassignedAsync(Guid userId);
+
+    /// <summary>
+    /// Set (or clear, with null) a transaction's adjusted amount — the split/reimbursed
+    /// overlay. The raw Plaid Amount is never modified. Negative amounts are rejected
+    /// with <see cref="AssignOutcome.InvalidAdjustment"/>.
+    /// </summary>
+    Task<AssignOutcome> AdjustAsync(Guid userId, Guid transactionId, decimal? adjustedAmount, string? note);
 }
 
 /// <summary>Result of an auto-assign run: how many were claimed and an optional cap warning.</summary>
@@ -48,5 +55,6 @@ public enum AssignOutcome
     Success,
     NotFound,
     CapReached,
-    InvalidCategory
+    InvalidCategory,
+    InvalidAdjustment
 }

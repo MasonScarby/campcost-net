@@ -137,6 +137,23 @@ public class TransactionAssignmentService : ITransactionAssignmentService
         return AssignOutcome.Success;
     }
 
+    public async Task<AssignOutcome> AdjustAsync(Guid userId, Guid transactionId, decimal? adjustedAmount, string? note)
+    {
+        if (adjustedAmount is < 0) return AssignOutcome.InvalidAdjustment;
+
+        var tx = await _db.Transactions
+            .FirstOrDefaultAsync(t => t.Id == transactionId && t.UserId == userId);
+        if (tx is null) return AssignOutcome.NotFound;
+
+        // Overlay only — tx.Amount (the raw Plaid figure) is never touched, so the
+        // original is always recoverable and the mirror stays a faithful mirror.
+        tx.AdjustedAmount = adjustedAmount;
+        tx.AdjustmentNote = string.IsNullOrWhiteSpace(note) ? null : note.Trim();
+        tx.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync();
+        return AssignOutcome.Success;
+    }
+
     public async Task<IReadOnlyList<Transaction>> GetUnassignedAsync(Guid userId)
     {
         return await _db.Transactions

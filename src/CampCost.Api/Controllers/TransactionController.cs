@@ -72,9 +72,29 @@ public class TransactionController : ControllerBase
             _ => Ok(new { success = true, transaction_id = id, trip_id = req.TripId })
         };
     }
+    // PATCH /api/transactions/{id}/adjust
+    // Split/reimbursed overlay: body { "adjusted_amount": 12.50, "adjustment_note": "Split 50/50" }.
+    // { "adjusted_amount": null } clears the adjustment. The raw Plaid amount is never
+    // modified — effective spend everywhere is coalesce(adjusted_amount, amount).
+    [HttpPatch("{id:guid}/adjust")]
+    public async Task<IActionResult> Adjust(Guid id, [FromBody] AdjustRequest req)
+    {
+        var outcome = await _assignment.AdjustAsync(UserId, id, req.AdjustedAmount, req.AdjustmentNote);
+        return outcome switch
+        {
+            AssignOutcome.NotFound => NotFound(new { error = "Transaction not found for this user." }),
+            AssignOutcome.InvalidAdjustment => BadRequest(new { error = "adjusted_amount cannot be negative" }),
+            _ => Ok(new { success = true, transaction_id = id, adjusted_amount = req.AdjustedAmount })
+        };
+    }
 }
 
 public record AssignRequest(
     [property: JsonPropertyName("trip_id")] Guid? TripId,
     [property: JsonPropertyName("category")] string? Category = null
+);
+
+public record AdjustRequest(
+    [property: JsonPropertyName("adjusted_amount")] decimal? AdjustedAmount,
+    [property: JsonPropertyName("adjustment_note")] string? AdjustmentNote = null
 );

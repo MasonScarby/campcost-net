@@ -48,6 +48,8 @@ public class NoopAssignmentService : ITransactionAssignmentService
         Task.FromResult(new AutoAssignResult(0, null));
     public Task<AssignOutcome> AssignAsync(Guid userId, Guid transactionId, Guid? tripId, string? category = null) =>
         Task.FromResult(AssignOutcome.Success);
+    public Task<AssignOutcome> AdjustAsync(Guid userId, Guid transactionId, decimal? adjustedAmount, string? note) =>
+        Task.FromResult(AssignOutcome.Success);
     public Task<IReadOnlyList<Transaction>> GetUnassignedAsync(Guid userId) =>
         Task.FromResult<IReadOnlyList<Transaction>>(new List<Transaction>());
 }

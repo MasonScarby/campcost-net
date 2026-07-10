@@ -17,7 +17,7 @@ const card = { background: 'white', borderRadius: 16, border: '1px solid #e8d5b0
 // Explicit column list for browser reads of `transactions`. Migration 004 revoked table-wide
 // SELECT and re-granted only safe columns, so select('*') = permission denied (PostgREST
 // expands * to every column). Keep this in sync with the grant in 005_fix_client_reads.sql.
-const TXN_COLUMNS = 'id, trip_id, amount, transaction_date, merchant_name, name, category, pending, reviewed, deleted_at'
+const TXN_COLUMNS = 'id, trip_id, amount, transaction_date, merchant_name, name, category, pending, reviewed, deleted_at, adjusted_amount, adjustment_note'
 
 export default function TripDetail() {
   const { id } = useParams()
@@ -194,6 +194,56 @@ export default function TripDetail() {
     setEditingId(null)
   }
 
+  // Split/adjust for BANK transactions — the raw Plaid amount is immutable, so this
+  // writes the adjusted_amount overlay via the API (PATCH /adjust), never Supabase.
+  const savePlaidAdjustment = async (txn) => {
+    setSavingEdit(true)
+    setEditError('')
+    const share = parseFloat(editShare)
+    if (isNaN(share) || share < 0) {
+      setEditError('Enter a valid amount.')
+      setSavingEdit(false)
+      return
+    }
+    const isAdjusted = share !== Number(txn.amount)
+    const body = {
+      adjusted_amount: isAdjusted ? share : null,
+      adjustment_note: isAdjusted ? (editNote.trim() || null) : null,
+    }
+    try {
+      const res = await backendFetch(`/api/transactions/${txn.id}/adjust`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setEditError(data.error || `Server error ${res.status}`)
+        setSavingEdit(false)
+        return
+      }
+      setTransactions(prev => prev.map(t =>
+        t.id === txn.id ? { ...t, adjusted_amount: body.adjusted_amount, adjustment_note: body.adjustment_note } : t
+      ))
+      setExpandedTxnId(null)
+    } catch (err) {
+      setEditError(err.message === 'Failed to fetch' ? 'Backend is not running.' : err.message)
+    }
+    setSavingEdit(false)
+  }
+
+  const clearPlaidAdjustment = async (txn) => {
+    const res = await backendFetch(`/api/transactions/${txn.id}/adjust`, {
+      method: 'PATCH',
+      body: JSON.stringify({ adjusted_amount: null, adjustment_note: null }),
+    })
+    if (res.ok) {
+      setTransactions(prev => prev.map(t =>
+        t.id === txn.id ? { ...t, adjusted_amount: null, adjustment_note: null } : t
+      ))
+      setExpandedTxnId(null)
+    }
+  }
+
   const addStop = async () => {
     if (!stopForm.location.trim()) return
     setSavingStop(true)
@@ -318,21 +368,23 @@ export default function TripDetail() {
   //   reviewed or not, since they're already scoped to the trip by trip_id.
   //   Manual expenses count only once reviewed (honoring adjusted amounts, skipping $0 "skipped").
   const reviewedManual = expenses.filter(e => e.reviewed !== false && e.adjustment_note !== 'skipped')
-  const plaidSpent = transactions.reduce((s, t) => s + Number(t.amount), 0)
+  // effectiveAmount honors splits on BOTH sources — transactions share the same
+  // adjusted_amount/amount field names as expenses (007 migration).
+  const plaidSpent = transactions.reduce((s, t) => s + effectiveAmount(t), 0)
   const manualSpent = reviewedManual.reduce((s, e) => s + effectiveAmount(e), 0)
   const totalSpent = plaidSpent + manualSpent
 
   // Unreviewed Plaid transactions on this trip: auto-added and already counted, but the
   // user hasn't confirmed they belong. Surfaced for review (confirm or remove).
   const unreviewedTxns = transactions.filter(t => !t.reviewed)
-  const unreviewedTotal = unreviewedTxns.reduce((s, t) => s + Number(t.amount), 0)
+  const unreviewedTotal = unreviewedTxns.reduce((s, t) => s + effectiveAmount(t), 0)
 
   const totalBudget = Number(trip.total_budget) || 0
   const pct = totalBudget > 0 ? Math.min((totalSpent / totalBudget) * 100, 100) : 0
 
   // Combined spend lines (Plaid + reviewed manual) drive the category + daily breakdowns.
   const spendLines = [
-    ...transactions.map(t => ({ category: t.category, amount: Number(t.amount), date: t.transaction_date })),
+    ...transactions.map(t => ({ category: t.category, amount: effectiveAmount(t), date: t.transaction_date })),
     ...reviewedManual.map(e => ({ category: e.category, amount: effectiveAmount(e), date: e.expense_date })),
   ]
   const spentByCategory = spendLines.reduce((acc, l) => {
@@ -376,9 +428,9 @@ export default function TripDetail() {
       date: t.transaction_date,
       title: t.merchant_name || t.name || CATEGORY_LABELS[t.category] || 'Transaction',
       searchText: `${t.merchant_name || ''} ${t.name || ''}`,
-      amount: Number(t.amount), original: Number(t.amount),
+      amount: effectiveAmount(t), original: Number(t.amount),
       category: t.category, reviewed: t.reviewed, pending: t.pending,
-      adjusted: false, adjustmentNote: null, raw: t,
+      adjusted: t.adjusted_amount != null, adjustmentNote: t.adjustment_note, raw: t,
     })),
     ...expenses.filter(e => e.adjustment_note !== 'skipped').map(e => ({
       key: `e-${e.id}`, id: e.id, source: 'manual',
@@ -929,8 +981,14 @@ export default function TripDetail() {
                 const onRowClick = () => {
                   if (it.source === 'manual') {
                     isEditing ? setEditingId(null) : openEdit(it.raw)
+                  } else if (isExpanded) {
+                    setExpandedTxnId(null)
                   } else {
-                    setExpandedTxnId(isExpanded ? null : it.id)
+                    // Prime the split inputs from the row so the panel opens ready to edit
+                    setExpandedTxnId(it.id)
+                    setEditShare(it.amount.toFixed(2))
+                    setEditNote(it.adjustmentNote || '')
+                    setEditError('')
                   }
                 }
                 return (
@@ -977,13 +1035,84 @@ export default function TripDetail() {
                     </div>
                   </div>
 
-                  {/* Plaid inline panel — immutable mirror, so no amount editing. Confirm or remove. */}
+                  {/* Plaid inline panel — the raw amount is an immutable mirror, but the
+                      split/reimbursed overlay (adjusted_amount, via the API) is editable,
+                      matching the manual-expense adjust flow. */}
                   {isExpanded && (
                     <div style={{ background: '#fdf6e8', border: '1px solid #e8d5b0', borderRadius: 12, padding: 16, marginBottom: 12 }}>
                       <p style={{ fontSize: 12, color: '#8b5e3c', margin: '0 0 10px', fontWeight: 600 }}>
-                        Bank transaction · ${it.amount.toFixed(2)} · {it.date}
+                        Bank transaction · original ${it.original.toFixed(2)} · {it.date}
                         {it.reviewed ? ' · reviewed' : ''}
                       </p>
+
+                      {/* Quick split presets — computed off the ORIGINAL bank amount */}
+                      <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+                        {['Split 50/50', 'Reimbursed', 'Split 70/30'].map(preset => (
+                          <button
+                            key={preset}
+                            onClick={() => {
+                              if (preset === 'Split 50/50') {
+                                setEditShare((it.original / 2).toFixed(2))
+                                setEditNote('Split 50/50')
+                              } else if (preset === 'Split 70/30') {
+                                setEditShare((it.original * 0.7).toFixed(2))
+                                setEditNote('Split 70/30')
+                              } else {
+                                setEditShare('0.00')
+                                setEditNote('Reimbursed')
+                              }
+                            }}
+                            style={{ fontSize: 12, background: 'white', border: '1px solid #e8d5b0', borderRadius: 8, padding: '5px 10px', cursor: 'pointer', color: '#4a3728' }}
+                          >
+                            {preset}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                        <div style={{ position: 'relative', flex: 1 }}>
+                          <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: '#8b5e3c', fontSize: 14 }}>$</span>
+                          <input
+                            type="number"
+                            placeholder="Your share"
+                            value={editShare}
+                            onChange={e => setEditShare(e.target.value)}
+                            style={{ width: '100%', border: '1px solid #e8d5b0', borderRadius: 10, padding: '9px 12px 9px 26px', fontSize: 14, outline: 'none', boxSizing: 'border-box' }}
+                          />
+                        </div>
+                        <input
+                          type="text"
+                          placeholder="Reason (e.g. Split with Stefanie)"
+                          value={editNote}
+                          onChange={e => setEditNote(e.target.value)}
+                          style={{ flex: 2, border: '1px solid #e8d5b0', borderRadius: 10, padding: '9px 12px', fontSize: 14, outline: 'none' }}
+                        />
+                      </div>
+
+                      {editError && (
+                        <p style={{ fontSize: 12, color: '#d4622a', background: '#fff5f0', borderRadius: 8, padding: '8px 12px', marginBottom: 8 }}>
+                          {editError}
+                        </p>
+                      )}
+
+                      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                        <button
+                          onClick={() => savePlaidAdjustment(it.raw)}
+                          disabled={savingEdit}
+                          style={{ flex: 1, background: '#2d5a27', color: 'white', border: 'none', borderRadius: 10, padding: '9px', fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: savingEdit ? 0.6 : 1 }}
+                        >
+                          {savingEdit ? 'Saving...' : 'Save split'}
+                        </button>
+                        {it.adjusted && (
+                          <button
+                            onClick={() => clearPlaidAdjustment(it.raw)}
+                            style={{ flex: 1, background: 'white', border: '1px solid #e8d5b0', color: '#8b5e3c', borderRadius: 10, padding: '9px', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}
+                          >
+                            Remove adjustment
+                          </button>
+                        )}
+                      </div>
+
                       <div style={{ display: 'flex', gap: 8 }}>
                         {!it.reviewed && (
                           <button

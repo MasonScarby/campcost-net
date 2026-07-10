@@ -63,7 +63,7 @@ export default function Dashboard() {
       // a parent trip.
       const { data, error } = await supabase
         .from('trips')
-        .select('*, expenses(amount, adjusted_amount, reviewed), transactions(amount, reviewed, deleted_at)')
+        .select('*, expenses(amount, adjusted_amount, reviewed), transactions(amount, adjusted_amount, reviewed, deleted_at)')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false })
       if (!error) setTrips(data ?? [])
@@ -103,7 +103,8 @@ export default function Dashboard() {
     // /api/trips/{id}/budget.
     const plaid = (trip.transactions ?? [])
       .filter(t => !t.deleted_at)
-      .reduce((sum, t) => sum + Number(t.amount), 0)
+      // adjusted_amount = user's share of a split (007); falls back to the raw amount
+      .reduce((sum, t) => sum + (t.adjusted_amount != null ? Number(t.adjusted_amount) : Number(t.amount)), 0)
     return manual + plaid
   }
 
