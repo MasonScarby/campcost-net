@@ -226,6 +226,31 @@ public class TransactionAssignmentServiceTests
     }
 
     [Fact]
+    public async Task SoftDelete_SetsDeletedAt_RowSurvivesInDb()
+    {
+        var tx = SeedTx("delete-me", tripId: null, daysAgo: 1);
+
+        var outcome = await _sut.SoftDeleteAsync(_userId, tx.Id);
+
+        outcome.Should().Be(AssignOutcome.Success);
+        // Hidden from normal queries, but the row still exists (never hard-deleted).
+        (await _db.Transactions.CountAsync()).Should().Be(0);
+        var raw = await _db.Transactions.IgnoreQueryFilters().SingleAsync();
+        raw.DeletedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task SoftDelete_ForeignUser_NotFound()
+    {
+        var tx = SeedTx("not-yours", tripId: null, daysAgo: 1);
+
+        var outcome = await _sut.SoftDeleteAsync(Guid.NewGuid(), tx.Id);
+
+        outcome.Should().Be(AssignOutcome.NotFound);
+        (await _db.Transactions.SingleAsync()).DeletedAt.Should().BeNull();
+    }
+
+    [Fact]
     public async Task GetUnassigned_ReturnsOnlyNullTripNonDeleted()
     {
         SeedTx("unassigned", tripId: null, daysAgo: 1);

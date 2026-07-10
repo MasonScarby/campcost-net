@@ -154,6 +154,22 @@ public class TransactionAssignmentService : ITransactionAssignmentService
         return AssignOutcome.Success;
     }
 
+    public async Task<AssignOutcome> SoftDeleteAsync(Guid userId, Guid transactionId)
+    {
+        // The query filter hides already-deleted rows, so double-deleting returns NotFound
+        // (harmless and honest — the row is already gone from the user's view).
+        var tx = await _db.Transactions
+            .FirstOrDefaultAsync(t => t.Id == transactionId && t.UserId == userId);
+        if (tx is null) return AssignOutcome.NotFound;
+
+        tx.DeletedAt = DateTime.UtcNow;
+        tx.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync();
+
+        _logger.LogInformation("User soft-deleted transaction {TransactionId}", transactionId);
+        return AssignOutcome.Success;
+    }
+
     public async Task<IReadOnlyList<Transaction>> GetUnassignedAsync(Guid userId)
     {
         return await _db.Transactions

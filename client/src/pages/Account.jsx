@@ -31,6 +31,8 @@ export default function Account() {
   const [plan, setPlanState] = useState(getPlan)
   const [unassigned, setUnassigned] = useState([])
   const [assignError, setAssignError] = useState('')
+  const [confirmDeleteTxId, setConfirmDeleteTxId] = useState(null)
+  const [deletingTxId, setDeletingTxId] = useState(null)
 
   // Server is the source of truth for the plan; localStorage is just a display cache
   useEffect(() => {
@@ -57,6 +59,27 @@ export default function Account() {
       // 402 = free-plan trip already holds 50 assigned transactions
       const data = await res.json().catch(() => ({}))
       setAssignError(data.error || `Could not assign (server error ${res.status})`)
+    }
+  }
+
+  // Soft-delete only (API sets deleted_at) — financial history is never hard-deleted,
+  // and dedup on plaid_transaction_id keeps the next sync from re-importing it.
+  const deleteTransaction = async (txId) => {
+    setDeletingTxId(txId)
+    setAssignError('')
+    try {
+      const res = await backendFetch(`/api/transactions/${txId}`, { method: 'DELETE' })
+      if (res.ok) {
+        setUnassigned(prev => prev.filter(t => t.id !== txId))
+        setConfirmDeleteTxId(null)
+      } else {
+        const data = await res.json().catch(() => ({}))
+        setAssignError(data.error || `Could not delete (server error ${res.status})`)
+      }
+    } catch {
+      setAssignError('Backend is not running.')
+    } finally {
+      setDeletingTxId(null)
     }
   }
 
@@ -322,21 +345,54 @@ export default function Account() {
           )}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {unassigned.map(t => (
-              <div key={t.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, background: '#f9f5ee', borderRadius: 10, padding: '8px 12px' }}>
-                <div style={{ minWidth: 0 }}>
-                  <p style={{ fontSize: 13, fontWeight: 600, color: '#4a3728', margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {t.merchant_name || t.name || 'Unknown'} · ${Number(t.amount).toFixed(2)}
-                  </p>
-                  <p style={{ fontSize: 11, color: '#8b5e3c', margin: 0 }}>{t.transaction_date}</p>
+              <div key={t.id} style={{ background: '#f9f5ee', borderRadius: 10, padding: '8px 12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                  <div style={{ minWidth: 0 }}>
+                    <p style={{ fontSize: 13, fontWeight: 600, color: '#4a3728', margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {t.merchant_name || t.name || 'Unknown'} · ${Number(t.amount).toFixed(2)}
+                    </p>
+                    <p style={{ fontSize: 11, color: '#8b5e3c', margin: 0 }}>{t.transaction_date}</p>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                    <select
+                      defaultValue=""
+                      onChange={e => assignTransaction(t.id, e.target.value)}
+                      style={{ border: '1px solid #e8d5b0', borderRadius: 8, padding: '6px 8px', fontSize: 12, background: 'white', color: '#4a3728' }}
+                    >
+                      <option value="" disabled>Assign to trip…</option>
+                      {trips.map(tr => <option key={tr.id} value={tr.id}>{tr.name || tr.id.slice(0, 8)}</option>)}
+                    </select>
+                    <button
+                      onClick={() => setConfirmDeleteTxId(confirmDeleteTxId === t.id ? null : t.id)}
+                      title="Delete transaction"
+                      style={{ background: 'none', border: 'none', color: '#c4b5a5', fontSize: 16, cursor: 'pointer', padding: '0 4px', lineHeight: 1 }}
+                    >
+                      ×
+                    </button>
+                  </div>
                 </div>
-                <select
-                  defaultValue=""
-                  onChange={e => assignTransaction(t.id, e.target.value)}
-                  style={{ border: '1px solid #e8d5b0', borderRadius: 8, padding: '6px 8px', fontSize: 12, background: 'white', color: '#4a3728' }}
-                >
-                  <option value="" disabled>Assign to trip…</option>
-                  {trips.map(tr => <option key={tr.id} value={tr.id}>{tr.name || tr.id.slice(0, 8)}</option>)}
-                </select>
+
+                {/* Inline delete confirm — soft-delete via API; never re-imported (dedup) */}
+                {confirmDeleteTxId === t.id && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, background: '#fff5f0', border: '1px solid #f5c5b0', borderRadius: 8, padding: '8px 10px' }}>
+                    <p style={{ fontSize: 12, color: '#d4622a', margin: 0, flex: 1 }}>
+                      Delete this transaction? It won't come back on future syncs.
+                    </p>
+                    <button
+                      onClick={() => deleteTransaction(t.id)}
+                      disabled={deletingTxId === t.id}
+                      style={{ background: '#d4622a', color: 'white', border: 'none', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer', opacity: deletingTxId === t.id ? 0.6 : 1 }}
+                    >
+                      {deletingTxId === t.id ? 'Deleting…' : 'Confirm'}
+                    </button>
+                    <button
+                      onClick={() => setConfirmDeleteTxId(null)}
+                      style={{ background: '#f5e6c8', color: '#8b5e3c', border: 'none', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
           </div>

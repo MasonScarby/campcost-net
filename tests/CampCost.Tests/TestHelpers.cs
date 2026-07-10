@@ -50,6 +50,8 @@ public class NoopAssignmentService : ITransactionAssignmentService
         Task.FromResult(AssignOutcome.Success);
     public Task<AssignOutcome> AdjustAsync(Guid userId, Guid transactionId, decimal? adjustedAmount, string? note) =>
         Task.FromResult(AssignOutcome.Success);
+    public Task<AssignOutcome> SoftDeleteAsync(Guid userId, Guid transactionId) =>
+        Task.FromResult(AssignOutcome.Success);
     public Task<IReadOnlyList<Transaction>> GetUnassignedAsync(Guid userId) =>
         Task.FromResult<IReadOnlyList<Transaction>>(new List<Transaction>());
 }

@@ -44,6 +44,14 @@ public interface ITransactionAssignmentService
     /// with <see cref="AssignOutcome.InvalidAdjustment"/>.
     /// </summary>
     Task<AssignOutcome> AdjustAsync(Guid userId, Guid transactionId, decimal? adjustedAmount, string? note);
+
+    /// <summary>
+    /// User-initiated SOFT delete (sets deleted_at) — financial history is never hard-
+    /// deleted, and the plaid_transaction_id dedup (which ignores the soft-delete filter)
+    /// guarantees the row is never re-imported by a later sync. Hidden everywhere by the
+    /// global query filter afterwards.
+    /// </summary>
+    Task<AssignOutcome> SoftDeleteAsync(Guid userId, Guid transactionId);
 }
 
 /// <summary>Result of an auto-assign run: how many were claimed and an optional cap warning.</summary>

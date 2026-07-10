@@ -72,6 +72,21 @@ public class TransactionController : ControllerBase
             _ => Ok(new { success = true, transaction_id = id, trip_id = req.TripId })
         };
     }
+    // DELETE /api/transactions/{id}
+    // SOFT delete only (sets deleted_at) — financial history is never hard-deleted, and
+    // dedup on plaid_transaction_id (IgnoreQueryFilters) prevents the next sync from
+    // re-importing it. The row disappears from all views via the global query filter.
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        var outcome = await _assignment.SoftDeleteAsync(UserId, id);
+        return outcome switch
+        {
+            AssignOutcome.NotFound => NotFound(new { error = "Transaction not found for this user." }),
+            _ => Ok(new { success = true, transaction_id = id })
+        };
+    }
+
     // PATCH /api/transactions/{id}/adjust
     // Split/reimbursed overlay: body { "adjusted_amount": 12.50, "adjustment_note": "Split 50/50" }.
     // { "adjusted_amount": null } clears the adjustment. The raw Plaid amount is never
