@@ -1,3 +1,4 @@
+using CampCost.Api.Contracts;
 using CampCost.Core.Entities;
 using CampCost.Core.Interfaces;
 using CampCost.Infrastructure.Data;
@@ -7,7 +8,6 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace CampCost.Api.Controllers;
 
@@ -197,13 +197,3 @@ public class PlaidController : ControllerBase
         return Ok(new { received = true });
     }
 }
-
-public record ExchangeRequest(
-    [property: JsonPropertyName("public_token")] string PublicToken,
-    [property: JsonPropertyName("institution_name")] string? InstitutionName
-);
-
-public record WebhookPayload(
-    [property: JsonPropertyName("webhook_type")] string? WebhookType,
-    [property: JsonPropertyName("item_id")] string? ItemId
-);

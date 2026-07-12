@@ -1,3 +1,4 @@
+using CampCost.Api.Contracts;
 using CampCost.Core.Entities;
 using CampCost.Core.Interfaces;
 using CampCost.Core.Services;
@@ -6,7 +7,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
-using System.Text.Json.Serialization;
 
 namespace CampCost.Api.Controllers;
 
@@ -228,16 +228,3 @@ public class TripController : ControllerBase
         return transactions.Cast<ISpendLine>().Concat(manualExpenses).ToList();
     }
 }
-
-// `budgets` maps expense_category → planned amount (e.g. { "fuel": 200 }); when present on
-// create, total_budget is derived from its sum so the two can't drift apart.
-public record TripWriteRequest(
-    [property: JsonPropertyName("name")] string? Name,
-    [property: JsonPropertyName("destination")] string? Destination,
-    [property: JsonPropertyName("start_date")] DateOnly? StartDate,
-    [property: JsonPropertyName("end_date")] DateOnly? EndDate,
-    [property: JsonPropertyName("total_budget")] decimal? TotalBudget,
-    [property: JsonPropertyName("total_miles")] decimal? TotalMiles,
-    [property: JsonPropertyName("status")] string? Status,
-    [property: JsonPropertyName("budgets")] Dictionary<string, decimal>? Budgets
-);
