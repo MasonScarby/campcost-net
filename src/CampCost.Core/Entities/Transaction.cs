@@ -42,6 +42,15 @@ public class Transaction : ISpendLine
     public bool Reviewed { get; set; } = false;
 
     /// <summary>
+    /// User's share of a split/reimbursed transaction. NULL = no adjustment (full amount
+    /// counts). The raw Plaid Amount is NEVER edited — this is our overlay on top of it.
+    /// </summary>
+    public decimal? AdjustedAmount { get; set; }
+
+    /// <summary>Why the amount was adjusted (e.g. "Split 50/50", "Reimbursed").</summary>
+    public string? AdjustmentNote { get; set; }
+
+    /// <summary>
     /// Soft-delete marker — set when Plaid reports the transaction as `removed`.
     /// Financial history is never hard-deleted. A global query filter excludes
     /// soft-deleted rows from all queries unless IgnoreQueryFilters() is used.

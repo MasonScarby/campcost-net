@@ -25,9 +25,13 @@ export default function TransactionReview() {
     // (read-only RLS); confirm/remove writes go through the assign API. No client-side date
     // filtering is needed — the backend already scoped these to the trip by trip_id.
     const fetchUnreviewed = async () => {
+      // Explicit columns, NOT select('*'): migration 004 grants column-level SELECT only,
+      // and PostgREST expands * to ungranted columns → permission denied → empty queue.
+      // deleted_at filter mirrors the backend's soft-delete query filter.
       const { data: txns } = await supabase
-        .from('transactions').select('*')
-        .eq('trip_id', id).eq('reviewed', false)
+        .from('transactions')
+        .select('id, trip_id, amount, transaction_date, merchant_name, name, category, pending, reviewed, deleted_at')
+        .eq('trip_id', id).eq('reviewed', false).is('deleted_at', null)
         .order('transaction_date', { ascending: false })
 
       setUnreviewed(txns ?? [])
@@ -60,12 +64,14 @@ export default function TransactionReview() {
   }
 
   // Confirm = keep on this trip and mark reviewed (assign to the same trip_id).
+  // Sends the (possibly user-corrected) category — the API validates it against the
+  // expense_category enum and applies it with the same reviewed=true write.
   const confirmExpense = async () => {
     setSaving(true)
     try {
       const res = await backendFetch(`/api/transactions/${unreviewed[current].id}/assign`, {
         method: 'PATCH',
-        body: JSON.stringify({ trip_id: id }),
+        body: JSON.stringify({ trip_id: id, category: editCategory }),
       })
       if (!res.ok) { console.error('confirm failed:', res.status); return }
       advance()
@@ -148,13 +154,18 @@ export default function TransactionReview() {
               </span>
             </div>
 
-            {/* Category is auto-derived from the Plaid feed. Shown read-only — the immutable
-                transaction mirror isn't edited from the browser. */}
+            {/* Category is auto-derived from the Plaid feed but user-correctable — it's OUR
+                derived field, not immutable Plaid data. The write still goes through the
+                API (assign PATCH), never directly to the transactions table. */}
             <div>
               <label style={{ fontSize: 13, fontWeight: 600, color: '#8b5e3c', display: 'block', marginBottom: 8 }}>Category</label>
-              <div style={{ border: '1px solid #e8d5b0', borderRadius: 12, padding: '12px 14px', fontSize: 15, background: '#faf7f2', color: '#4a3728' }}>
-                {CATEGORY_LABELS[editCategory] || editCategory}
-              </div>
+              <select
+                value={editCategory || 'misc'}
+                onChange={e => setEditCategory(e.target.value)}
+                style={{ width: '100%', border: '1px solid #e8d5b0', borderRadius: 12, padding: '12px 14px', fontSize: 15, background: 'white', color: '#4a3728', outline: 'none' }}
+              >
+                {Object.entries(CATEGORY_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
             </div>
           </div>
 

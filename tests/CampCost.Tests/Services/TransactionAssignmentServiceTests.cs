@@ -146,6 +146,111 @@ public class TransactionAssignmentServiceTests
     }
 
     [Fact]
+    public async Task ManualAssign_WithCategory_AppliesUserCorrection()
+    {
+        var trip = SeedTrip();
+        var tx = SeedTx("recategorize", tripId: null, daysAgo: 5);
+
+        var outcome = await _sut.AssignAsync(_userId, tx.Id, trip.Id, category: "fuel");
+
+        outcome.Should().Be(AssignOutcome.Success);
+        var updated = await _db.Transactions.SingleAsync();
+        updated.Category.Should().Be("fuel");
+        updated.Reviewed.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ManualAssign_UnknownCategory_RejectsWithoutSideEffects()
+    {
+        var trip = SeedTrip();
+        var tx = SeedTx("bad-category", tripId: null, daysAgo: 5);
+        var originalCategory = tx.Category;
+
+        var outcome = await _sut.AssignAsync(_userId, tx.Id, trip.Id, category: "not_a_category");
+
+        outcome.Should().Be(AssignOutcome.InvalidCategory);
+        // Nothing half-applied: category, assignment, and reviewed all untouched.
+        var unchanged = await _db.Transactions.SingleAsync();
+        unchanged.Category.Should().Be(originalCategory);
+        unchanged.TripId.Should().BeNull();
+        unchanged.Reviewed.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Adjust_SetsOverlay_NeverTouchesRawAmount()
+    {
+        var tx = SeedTx("split-me", tripId: null, daysAgo: 5); // Amount = 10m
+
+        var outcome = await _sut.AdjustAsync(_userId, tx.Id, 5m, "Split 50/50");
+
+        outcome.Should().Be(AssignOutcome.Success);
+        var updated = await _db.Transactions.SingleAsync();
+        updated.AdjustedAmount.Should().Be(5m);
+        updated.AdjustmentNote.Should().Be("Split 50/50");
+        updated.Amount.Should().Be(10m); // raw Plaid amount is immutable
+    }
+
+    [Fact]
+    public async Task Adjust_NullAmount_ClearsOverlay()
+    {
+        var tx = SeedTx("clear-me", tripId: null, daysAgo: 5);
+        await _sut.AdjustAsync(_userId, tx.Id, 5m, "Split 50/50");
+
+        var outcome = await _sut.AdjustAsync(_userId, tx.Id, null, null);
+
+        outcome.Should().Be(AssignOutcome.Success);
+        var updated = await _db.Transactions.SingleAsync();
+        updated.AdjustedAmount.Should().BeNull();
+        updated.AdjustmentNote.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Adjust_NegativeAmount_Rejected()
+    {
+        var tx = SeedTx("negative", tripId: null, daysAgo: 5);
+
+        var outcome = await _sut.AdjustAsync(_userId, tx.Id, -1m, null);
+
+        outcome.Should().Be(AssignOutcome.InvalidAdjustment);
+        (await _db.Transactions.SingleAsync()).AdjustedAmount.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Adjust_ForeignUser_NotFound()
+    {
+        var tx = SeedTx("foreign", tripId: null, daysAgo: 5);
+
+        var outcome = await _sut.AdjustAsync(Guid.NewGuid(), tx.Id, 5m, null);
+
+        outcome.Should().Be(AssignOutcome.NotFound);
+    }
+
+    [Fact]
+    public async Task SoftDelete_SetsDeletedAt_RowSurvivesInDb()
+    {
+        var tx = SeedTx("delete-me", tripId: null, daysAgo: 1);
+
+        var outcome = await _sut.SoftDeleteAsync(_userId, tx.Id);
+
+        outcome.Should().Be(AssignOutcome.Success);
+        // Hidden from normal queries, but the row still exists (never hard-deleted).
+        (await _db.Transactions.CountAsync()).Should().Be(0);
+        var raw = await _db.Transactions.IgnoreQueryFilters().SingleAsync();
+        raw.DeletedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task SoftDelete_ForeignUser_NotFound()
+    {
+        var tx = SeedTx("not-yours", tripId: null, daysAgo: 1);
+
+        var outcome = await _sut.SoftDeleteAsync(Guid.NewGuid(), tx.Id);
+
+        outcome.Should().Be(AssignOutcome.NotFound);
+        (await _db.Transactions.SingleAsync()).DeletedAt.Should().BeNull();
+    }
+
+    [Fact]
     public async Task GetUnassigned_ReturnsOnlyNullTripNonDeleted()
     {
         SeedTx("unassigned", tripId: null, daysAgo: 1);

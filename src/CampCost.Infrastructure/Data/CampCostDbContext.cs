@@ -96,6 +96,8 @@ public class CampCostDbContext : DbContext
                  v => v.ToString());
             e.Property(x => x.Pending).HasColumnName("pending");
             e.Property(x => x.Reviewed).HasColumnName("reviewed");
+            e.Property(x => x.AdjustedAmount).HasColumnName("adjusted_amount");
+            e.Property(x => x.AdjustmentNote).HasColumnName("adjustment_note");
             e.Property(x => x.DeletedAt).HasColumnName("deleted_at");
             e.Property(x => x.CreatedAt).HasColumnName("created_at");
             e.Property(x => x.UpdatedAt).HasColumnName("updated_at");

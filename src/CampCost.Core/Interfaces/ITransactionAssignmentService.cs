@@ -29,11 +29,29 @@ public interface ITransactionAssignmentService
     /// transaction (or target trip) isn't owned by the user, <see cref="AssignOutcome.CapReached"/>
     /// when a free-plan trip is already at the assignment cap, otherwise
     /// <see cref="AssignOutcome.Success"/>. Passing a null tripId unassigns (never capped).
+    /// An optional category corrects the auto-derived one during review — it's OUR derived
+    /// field, not immutable Plaid data (amount/date/merchant stay untouchable). An unknown
+    /// category returns <see cref="AssignOutcome.InvalidCategory"/> and changes nothing.
     /// </summary>
-    Task<AssignOutcome> AssignAsync(Guid userId, Guid transactionId, Guid? tripId);
+    Task<AssignOutcome> AssignAsync(Guid userId, Guid transactionId, Guid? tripId, string? category = null);
 
     /// <summary>The user's stored, non-deleted transactions with no trip assigned (review queue).</summary>
     Task<IReadOnlyList<Transaction>> GetUnassignedAsync(Guid userId);
+
+    /// <summary>
+    /// Set (or clear, with null) a transaction's adjusted amount — the split/reimbursed
+    /// overlay. The raw Plaid Amount is never modified. Negative amounts are rejected
+    /// with <see cref="AssignOutcome.InvalidAdjustment"/>.
+    /// </summary>
+    Task<AssignOutcome> AdjustAsync(Guid userId, Guid transactionId, decimal? adjustedAmount, string? note);
+
+    /// <summary>
+    /// User-initiated SOFT delete (sets deleted_at) — financial history is never hard-
+    /// deleted, and the plaid_transaction_id dedup (which ignores the soft-delete filter)
+    /// guarantees the row is never re-imported by a later sync. Hidden everywhere by the
+    /// global query filter afterwards.
+    /// </summary>
+    Task<AssignOutcome> SoftDeleteAsync(Guid userId, Guid transactionId);
 }
 
 /// <summary>Result of an auto-assign run: how many were claimed and an optional cap warning.</summary>
@@ -44,5 +62,7 @@ public enum AssignOutcome
 {
     Success,
     NotFound,
-    CapReached
+    CapReached,
+    InvalidCategory,
+    InvalidAdjustment
 }

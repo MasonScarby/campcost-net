@@ -14,6 +14,11 @@ const CATEGORY_LABELS = {
 
 const card = { background: 'white', borderRadius: 16, border: '1px solid #e8d5b0', padding: 20, marginBottom: 12 }
 
+// Explicit column list for browser reads of `transactions`. Migration 004 revoked table-wide
+// SELECT and re-granted only safe columns, so select('*') = permission denied (PostgREST
+// expands * to every column). Keep this in sync with the grant in 005_fix_client_reads.sql.
+const TXN_COLUMNS = 'id, trip_id, amount, transaction_date, merchant_name, name, category, pending, reviewed, deleted_at, adjusted_amount, adjustment_note'
+
 export default function TripDetail() {
   const { id } = useParams()
   const { user } = useAuth()
@@ -52,11 +57,32 @@ export default function TripDetail() {
   const [filterCategory, setFilterCategory] = useState('')
   const [filterSort, setFilterSort] = useState('')
 
+  // In-window transactions living elsewhere (other trips or unassigned). Reviewed rows
+  // are never auto-moved, so without this list a transaction reviewed onto an overlapping
+  // trip is invisible from this one forever — manual "Move here" is the only escape hatch.
+  const [windowTxns, setWindowTxns] = useState([])
+  const [tripNames, setTripNames] = useState({})
+
   // Campground stops
   const [stops, setStops] = useState([])
   const [showAddStop, setShowAddStop] = useState(false)
   const [stopForm, setStopForm] = useState({ location: '', type: 'campground', arrival_date: '', departure_date: '', cost_per_night: '', notes: '' })
   const [savingStop, setSavingStop] = useState(false)
+
+  // In-window transactions NOT on this trip (other trips or unassigned, incl. reviewed).
+  // The .or() is needed because trip_id.neq alone excludes NULLs in SQL.
+  const fetchWindowTxns = async (start, end) => {
+    const [{ data: others }, { data: allTrips }] = await Promise.all([
+      supabase.from('transactions').select(TXN_COLUMNS)
+        .gte('transaction_date', start).lte('transaction_date', end)
+        .is('deleted_at', null)
+        .or(`trip_id.neq.${id},trip_id.is.null`)
+        .order('transaction_date', { ascending: false }),
+      supabase.from('trips').select('id, name').eq('user_id', user.id),
+    ])
+    setWindowTxns(others ?? [])
+    setTripNames(Object.fromEntries((allTrips ?? []).map(t => [t.id, t.name])))
+  }
 
   useEffect(() => {
     const fetchAll = async () => {
@@ -67,7 +93,11 @@ export default function TripDetail() {
         supabase.from('expenses').select('*').eq('trip_id', id).order('expense_date', { ascending: false }),
         // transactions = Plaid mirror (source of truth) assigned to this trip.
         // Browser has read-only RLS access; all writes go through the API.
-        supabase.from('transactions').select('*').eq('trip_id', id).order('transaction_date', { ascending: false }),
+        // NEVER select('*') here: migration 004 grants column-level SELECT, and PostgREST
+        // expands * to ALL columns (incl. ungranted plaid_transaction_id etc.), which fails
+        // the whole query with permission denied — the trip then renders $0 / empty.
+        // deleted_at filter mirrors the backend's soft-delete query filter.
+        supabase.from('transactions').select(TXN_COLUMNS).eq('trip_id', id).is('deleted_at', null).order('transaction_date', { ascending: false }),
         supabase.from('trip_stops').select('*').eq('trip_id', id).order('arrival_date', { ascending: true }),
       ])
       setTrip(t)
@@ -75,10 +105,35 @@ export default function TripDetail() {
       setExpenses(e ?? [])
       setTransactions(x ?? [])
       setStops(s ?? [])
+      if (t?.start_date && t?.end_date) {
+        await fetchWindowTxns(t.start_date, t.end_date)
+      }
       setLoading(false)
     }
     fetchAll()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, user.id])
+
+  // Pull an elsewhere-living transaction onto THIS trip. Manual assign may move
+  // reviewed rows (only AUTO-assign must respect them); marks reviewed on the way.
+  const claimTransaction = async (txn) => {
+    setTxnBusyId(txn.id)
+    try {
+      const res = await backendFetch(`/api/transactions/${txn.id}/assign`, {
+        method: 'PATCH',
+        body: JSON.stringify({ trip_id: id }),
+      })
+      if (res.ok) {
+        setWindowTxns(prev => prev.filter(t => t.id !== txn.id))
+        setTransactions(prev => [{ ...txn, trip_id: id, reviewed: true }, ...prev])
+      } else if (res.status === 402) {
+        const data = await res.json().catch(() => ({}))
+        setCapWarning(data.error || 'Free plan transaction limit reached — upgrade for unlimited.')
+      }
+    } finally {
+      setTxnBusyId(null)
+    }
+  }
 
   const fetchExpenses = async () => {
     const { data: e } = await supabase
@@ -87,9 +142,10 @@ export default function TripDetail() {
   }
 
   // Re-pull the Plaid transactions currently assigned to this trip (source of truth).
+  // Explicit columns + deleted_at filter — see TXN_COLUMNS comment for why * breaks.
   const fetchTransactions = async () => {
     const { data: x } = await supabase
-      .from('transactions').select('*').eq('trip_id', id).order('transaction_date', { ascending: false })
+      .from('transactions').select(TXN_COLUMNS).eq('trip_id', id).is('deleted_at', null).order('transaction_date', { ascending: false })
     setTransactions(x ?? [])
   }
 
@@ -119,7 +175,11 @@ export default function TripDetail() {
       })
       if (res.ok) {
         if (tripId === null) {
-          setTransactions(prev => prev.filter(t => t.id !== txnId)) // no longer on this trip
+          // No longer on this trip — surface it in the "other transactions" list so it
+          // stays reachable (it's reviewed now, so auto-assign will never reclaim it).
+          const removed = transactions.find(t => t.id === txnId)
+          setTransactions(prev => prev.filter(t => t.id !== txnId))
+          if (removed) setWindowTxns(prev => [{ ...removed, trip_id: null, reviewed: true }, ...prev])
         } else {
           setTransactions(prev => prev.map(t => t.id === txnId ? { ...t, reviewed: true } : t))
         }
@@ -184,15 +244,63 @@ export default function TripDetail() {
     setEditingId(null)
   }
 
+  // Split/adjust for BANK transactions — the raw Plaid amount is immutable, so this
+  // writes the adjusted_amount overlay via the API (PATCH /adjust), never Supabase.
+  const savePlaidAdjustment = async (txn) => {
+    setSavingEdit(true)
+    setEditError('')
+    const share = parseFloat(editShare)
+    if (isNaN(share) || share < 0) {
+      setEditError('Enter a valid amount.')
+      setSavingEdit(false)
+      return
+    }
+    const isAdjusted = share !== Number(txn.amount)
+    const body = {
+      adjusted_amount: isAdjusted ? share : null,
+      adjustment_note: isAdjusted ? (editNote.trim() || null) : null,
+    }
+    try {
+      const res = await backendFetch(`/api/transactions/${txn.id}/adjust`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setEditError(data.error || `Server error ${res.status}`)
+        setSavingEdit(false)
+        return
+      }
+      setTransactions(prev => prev.map(t =>
+        t.id === txn.id ? { ...t, adjusted_amount: body.adjusted_amount, adjustment_note: body.adjustment_note } : t
+      ))
+      setExpandedTxnId(null)
+    } catch (err) {
+      setEditError(err.message === 'Failed to fetch' ? 'Backend is not running.' : err.message)
+    }
+    setSavingEdit(false)
+  }
+
+  const clearPlaidAdjustment = async (txn) => {
+    const res = await backendFetch(`/api/transactions/${txn.id}/adjust`, {
+      method: 'PATCH',
+      body: JSON.stringify({ adjusted_amount: null, adjustment_note: null }),
+    })
+    if (res.ok) {
+      setTransactions(prev => prev.map(t =>
+        t.id === txn.id ? { ...t, adjusted_amount: null, adjustment_note: null } : t
+      ))
+      setExpandedTxnId(null)
+    }
+  }
+
   const addStop = async () => {
     if (!stopForm.location.trim()) return
     setSavingStop(true)
-    const nights = stopForm.arrival_date && stopForm.departure_date
-      ? Math.max(0, Math.round((new Date(stopForm.departure_date) - new Date(stopForm.arrival_date)) / 86400000))
-      : null
+    // No user_id column on trip_stops — ownership is derived through the trip by RLS
+    // ("Users own their stops" joins trips.user_id). Sending user_id fails the insert.
     const { data, error } = await supabase.from('trip_stops').insert({
       trip_id: id,
-      user_id: user.id,
       location: stopForm.location.trim(),
       type: stopForm.type,
       arrival_date: stopForm.arrival_date || null,
@@ -310,21 +418,23 @@ export default function TripDetail() {
   //   reviewed or not, since they're already scoped to the trip by trip_id.
   //   Manual expenses count only once reviewed (honoring adjusted amounts, skipping $0 "skipped").
   const reviewedManual = expenses.filter(e => e.reviewed !== false && e.adjustment_note !== 'skipped')
-  const plaidSpent = transactions.reduce((s, t) => s + Number(t.amount), 0)
+  // effectiveAmount honors splits on BOTH sources — transactions share the same
+  // adjusted_amount/amount field names as expenses (007 migration).
+  const plaidSpent = transactions.reduce((s, t) => s + effectiveAmount(t), 0)
   const manualSpent = reviewedManual.reduce((s, e) => s + effectiveAmount(e), 0)
   const totalSpent = plaidSpent + manualSpent
 
   // Unreviewed Plaid transactions on this trip: auto-added and already counted, but the
   // user hasn't confirmed they belong. Surfaced for review (confirm or remove).
   const unreviewedTxns = transactions.filter(t => !t.reviewed)
-  const unreviewedTotal = unreviewedTxns.reduce((s, t) => s + Number(t.amount), 0)
+  const unreviewedTotal = unreviewedTxns.reduce((s, t) => s + effectiveAmount(t), 0)
 
   const totalBudget = Number(trip.total_budget) || 0
   const pct = totalBudget > 0 ? Math.min((totalSpent / totalBudget) * 100, 100) : 0
 
   // Combined spend lines (Plaid + reviewed manual) drive the category + daily breakdowns.
   const spendLines = [
-    ...transactions.map(t => ({ category: t.category, amount: Number(t.amount), date: t.transaction_date })),
+    ...transactions.map(t => ({ category: t.category, amount: effectiveAmount(t), date: t.transaction_date })),
     ...reviewedManual.map(e => ({ category: e.category, amount: effectiveAmount(e), date: e.expense_date })),
   ]
   const spentByCategory = spendLines.reduce((acc, l) => {
@@ -368,9 +478,9 @@ export default function TripDetail() {
       date: t.transaction_date,
       title: t.merchant_name || t.name || CATEGORY_LABELS[t.category] || 'Transaction',
       searchText: `${t.merchant_name || ''} ${t.name || ''}`,
-      amount: Number(t.amount), original: Number(t.amount),
+      amount: effectiveAmount(t), original: Number(t.amount),
       category: t.category, reviewed: t.reviewed, pending: t.pending,
-      adjusted: false, adjustmentNote: null, raw: t,
+      adjusted: t.adjusted_amount != null, adjustmentNote: t.adjustment_note, raw: t,
     })),
     ...expenses.filter(e => e.adjustment_note !== 'skipped').map(e => ({
       key: `e-${e.id}`, id: e.id, source: 'manual',
@@ -921,8 +1031,14 @@ export default function TripDetail() {
                 const onRowClick = () => {
                   if (it.source === 'manual') {
                     isEditing ? setEditingId(null) : openEdit(it.raw)
+                  } else if (isExpanded) {
+                    setExpandedTxnId(null)
                   } else {
-                    setExpandedTxnId(isExpanded ? null : it.id)
+                    // Prime the split inputs from the row so the panel opens ready to edit
+                    setExpandedTxnId(it.id)
+                    setEditShare(it.amount.toFixed(2))
+                    setEditNote(it.adjustmentNote || '')
+                    setEditError('')
                   }
                 }
                 return (
@@ -969,13 +1085,84 @@ export default function TripDetail() {
                     </div>
                   </div>
 
-                  {/* Plaid inline panel — immutable mirror, so no amount editing. Confirm or remove. */}
+                  {/* Plaid inline panel — the raw amount is an immutable mirror, but the
+                      split/reimbursed overlay (adjusted_amount, via the API) is editable,
+                      matching the manual-expense adjust flow. */}
                   {isExpanded && (
                     <div style={{ background: '#fdf6e8', border: '1px solid #e8d5b0', borderRadius: 12, padding: 16, marginBottom: 12 }}>
                       <p style={{ fontSize: 12, color: '#8b5e3c', margin: '0 0 10px', fontWeight: 600 }}>
-                        Bank transaction · ${it.amount.toFixed(2)} · {it.date}
+                        Bank transaction · original ${it.original.toFixed(2)} · {it.date}
                         {it.reviewed ? ' · reviewed' : ''}
                       </p>
+
+                      {/* Quick split presets — computed off the ORIGINAL bank amount */}
+                      <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+                        {['Split 50/50', 'Reimbursed', 'Split 70/30'].map(preset => (
+                          <button
+                            key={preset}
+                            onClick={() => {
+                              if (preset === 'Split 50/50') {
+                                setEditShare((it.original / 2).toFixed(2))
+                                setEditNote('Split 50/50')
+                              } else if (preset === 'Split 70/30') {
+                                setEditShare((it.original * 0.7).toFixed(2))
+                                setEditNote('Split 70/30')
+                              } else {
+                                setEditShare('0.00')
+                                setEditNote('Reimbursed')
+                              }
+                            }}
+                            style={{ fontSize: 12, background: 'white', border: '1px solid #e8d5b0', borderRadius: 8, padding: '5px 10px', cursor: 'pointer', color: '#4a3728' }}
+                          >
+                            {preset}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                        <div style={{ position: 'relative', flex: 1 }}>
+                          <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: '#8b5e3c', fontSize: 14 }}>$</span>
+                          <input
+                            type="number"
+                            placeholder="Your share"
+                            value={editShare}
+                            onChange={e => setEditShare(e.target.value)}
+                            style={{ width: '100%', border: '1px solid #e8d5b0', borderRadius: 10, padding: '9px 12px 9px 26px', fontSize: 14, outline: 'none', boxSizing: 'border-box' }}
+                          />
+                        </div>
+                        <input
+                          type="text"
+                          placeholder="Reason (e.g. Split with Stefanie)"
+                          value={editNote}
+                          onChange={e => setEditNote(e.target.value)}
+                          style={{ flex: 2, border: '1px solid #e8d5b0', borderRadius: 10, padding: '9px 12px', fontSize: 14, outline: 'none' }}
+                        />
+                      </div>
+
+                      {editError && (
+                        <p style={{ fontSize: 12, color: '#d4622a', background: '#fff5f0', borderRadius: 8, padding: '8px 12px', marginBottom: 8 }}>
+                          {editError}
+                        </p>
+                      )}
+
+                      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                        <button
+                          onClick={() => savePlaidAdjustment(it.raw)}
+                          disabled={savingEdit}
+                          style={{ flex: 1, background: '#2d5a27', color: 'white', border: 'none', borderRadius: 10, padding: '9px', fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: savingEdit ? 0.6 : 1 }}
+                        >
+                          {savingEdit ? 'Saving...' : 'Save split'}
+                        </button>
+                        {it.adjusted && (
+                          <button
+                            onClick={() => clearPlaidAdjustment(it.raw)}
+                            style={{ flex: 1, background: 'white', border: '1px solid #e8d5b0', color: '#8b5e3c', borderRadius: 10, padding: '9px', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}
+                          >
+                            Remove adjustment
+                          </button>
+                        )}
+                      </div>
+
                       <div style={{ display: 'flex', gap: 8 }}>
                         {!it.reviewed && (
                           <button
@@ -1111,6 +1298,51 @@ export default function TripDetail() {
           </div>
         )}
       </div>
+
+      {/* Other transactions in this trip's date range — on other trips or unassigned.
+          Reviewed rows are never auto-moved, so this is the only place they can be
+          pulled into an overlapping trip. */}
+      {windowTxns.length > 0 && (
+        <div style={card}>
+          <h2 style={{ fontSize: 17, fontWeight: 600, color: '#4a3728', margin: '0 0 4px' }}>
+            Other transactions in this date range
+          </h2>
+          <p style={{ fontSize: 12, color: '#8b5e3c', margin: '0 0 12px' }}>
+            {windowTxns.length} transaction{windowTxns.length !== 1 ? 's' : ''} from your bank in this window that {windowTxns.length !== 1 ? 'are' : 'is'} on another trip or unassigned.
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 1, maxHeight: 400, overflowY: 'auto' }}>
+            {windowTxns.map((t, i) => (
+              <div key={t.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '10px 0', borderBottom: i < windowTxns.length - 1 ? '1px solid #f5e6c8' : 'none' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <p style={{ fontSize: 14, color: '#4a3728', margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {t.merchant_name || t.name || CATEGORY_LABELS[t.category] || 'Transaction'}
+                  </p>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                    <span style={{
+                      fontSize: 11, borderRadius: 6, padding: '1px 7px', fontWeight: 600,
+                      background: t.trip_id ? '#ede4f5' : '#f5e6c8',
+                      color: t.trip_id ? '#7a5c99' : '#8b5e3c',
+                    }}>
+                      {t.trip_id ? (tripNames[t.trip_id] || 'Another trip') : 'Unassigned'}
+                    </span>
+                    <span style={{ fontSize: 12, color: '#8b5e3c' }}>{t.transaction_date}</span>
+                  </div>
+                </div>
+                <span style={{ fontSize: 14, fontWeight: 700, color: '#4a3728', flexShrink: 0 }}>
+                  ${effectiveAmount(t).toFixed(2)}
+                </span>
+                <button
+                  onClick={() => claimTransaction(t)}
+                  disabled={txnBusyId === t.id}
+                  style={{ background: '#2d5a27', color: 'white', border: 'none', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer', flexShrink: 0, opacity: txnBusyId === t.id ? 0.6 : 1 }}
+                >
+                  {txnBusyId === t.id ? '...' : 'Move here'}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   )

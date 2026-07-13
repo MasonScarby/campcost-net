@@ -2,6 +2,7 @@ using CampCost.Core.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using System.Security.Claims;
+using System.Text.Json.Serialization;
 
 namespace CampCost.Api.Controllers;
 
@@ -11,8 +12,13 @@ namespace CampCost.Api.Controllers;
 public class AccountController : ControllerBase
 {
     private readonly IPlanService _plans;
+    private readonly IWebHostEnvironment _env;
 
-    public AccountController(IPlanService plans) => _plans = plans;
+    public AccountController(IPlanService plans, IWebHostEnvironment env)
+    {
+        _plans = plans;
+        _env = env;
+    }
 
     private Guid UserId => Guid.Parse(
         User.FindFirstValue(ClaimTypes.NameIdentifier)
@@ -28,4 +34,23 @@ public class AccountController : ControllerBase
         var plan = await _plans.GetPlanAsync(UserId);
         return Ok(new { plan });
     }
+
+    // POST /api/account/plan  { "plan": "pro" | "free" }
+    // DEV-ONLY manual plan switch so Pro features can be exercised before Stripe exists.
+    // Returns 404 outside Development, so it CANNOT be used to self-upgrade in production —
+    // there, the plan write belongs to the Stripe webhook (service role). See FIXES.md #9.
+    [HttpPost("plan")]
+    public async Task<IActionResult> SetPlan([FromBody] SetPlanRequest req)
+    {
+        if (!_env.IsDevelopment())
+            return NotFound();
+
+        if (req.Plan is not ("free" or "pro"))
+            return BadRequest(new { error = "plan must be 'free' or 'pro'" });
+
+        await _plans.SetPlanAsync(UserId, req.Plan);
+        return Ok(new { plan = req.Plan });
+    }
 }
+
+public record SetPlanRequest([property: JsonPropertyName("plan")] string Plan);

@@ -74,7 +74,14 @@ builder.Services.AddCors(options =>
               .AllowAnyHeader()
               .AllowAnyMethod()));
 
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    // EF fixes up navigations both ways (Trip.BudgetCategories ↔ BudgetCategory.Trip),
+    // so returning a tracked entity would loop forever during serialization and 500
+    // AFTER the save (trip created, response dead). IgnoreCycles emits null at the
+    // point of the cycle instead.
+    .AddJsonOptions(o =>
+        o.JsonSerializerOptions.ReferenceHandler =
+            System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles);
 builder.Services.AddEndpointsApiExplorer();
 
 // --- Swagger with JWT Bearer support ---
