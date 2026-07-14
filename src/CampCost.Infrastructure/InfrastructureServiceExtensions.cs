@@ -54,6 +54,7 @@ public static class InfrastructureServiceExtensions
         // Scoped services (one per HTTP request)
         services.AddScoped<IPlanService, PlanService>();
         services.AddScoped<IPlaidService, PlaidService>();
+        services.AddScoped<IAccountService, AccountService>();
         services.AddScoped<ITransactionSyncService, TransactionSyncService>();
         services.AddScoped<ITransactionAssignmentService, TransactionAssignmentService>();
 

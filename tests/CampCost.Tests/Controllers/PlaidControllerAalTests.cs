@@ -27,6 +27,7 @@ public class PlaidControllerAalTests
             plaid.Object,
             new Mock<ITransactionSyncService>().Object,
             new Mock<IPlaidWebhookVerifier>().Object,
+            new Mock<IAccountService>().Object,
             TestHelpers.NewDb(),
             NullLogger<PlaidController>.Instance);
         controller.SetUser(UserId, aal);

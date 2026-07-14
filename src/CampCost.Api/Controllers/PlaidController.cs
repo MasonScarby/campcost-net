@@ -20,6 +20,7 @@ public class PlaidController : ControllerBase
     private readonly IPlaidService _plaid;
     private readonly ITransactionSyncService _sync;
     private readonly IPlaidWebhookVerifier _webhookVerifier;
+    private readonly IAccountService _account;
     private readonly CampCostDbContext _db;
     private readonly ILogger<PlaidController> _logger;
 
@@ -27,12 +28,14 @@ public class PlaidController : ControllerBase
         IPlaidService plaid,
         ITransactionSyncService sync,
         IPlaidWebhookVerifier webhookVerifier,
+        IAccountService account,
         CampCostDbContext db,
         ILogger<PlaidController> logger)
     {
         _plaid = plaid;
         _sync = sync;
         _webhookVerifier = webhookVerifier;
+        _account = account;
         _db = db;
         _logger = logger;
     }
@@ -138,6 +141,22 @@ public class PlaidController : ControllerBase
         return Ok(new { success = true, connections_reset = connections.Count });
     }
 
+    // POST /api/plaid/disconnect  { "item_id": "<plaid item id>" }
+    // Disconnects a linked bank: calls Plaid /item/remove to invalidate the access token, then
+    // deletes the local connection (historical transactions are kept, just detached). Required
+    // so a user can revoke bank access — and so we stop holding a live token we no longer need.
+    [HttpPost("disconnect")]
+    public async Task<IActionResult> Disconnect([FromBody] DisconnectRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.ItemId))
+            return BadRequest(new { error = "item_id is required" });
+
+        var ok = await _account.DisconnectBankAsync(UserId, req.ItemId);
+        return ok
+            ? Ok(new { success = true })
+            : NotFound(new { error = "No connected bank found with that item_id." });
+    }
+
     // POST /api/plaid/webhook
     // Receives push notifications from Plaid. Only acts on TRANSACTIONS webhooks.
     // Looks up the affected user by item_id and syncs only them.
@@ -206,4 +225,8 @@ public record ExchangeRequest(
 public record WebhookPayload(
     [property: JsonPropertyName("webhook_type")] string? WebhookType,
     [property: JsonPropertyName("item_id")] string? ItemId
+);
+
+public record DisconnectRequest(
+    [property: JsonPropertyName("item_id")] string ItemId
 );
