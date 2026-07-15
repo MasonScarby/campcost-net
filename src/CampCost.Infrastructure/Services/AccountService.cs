@@ -43,9 +43,11 @@ public class AccountService : IAccountService
 
         await SafeRemoveItemAsync(connection.AccessToken);
 
-        // Deleting the connection cascades to its transactions — transactions.plaid_connection_id
-        // is `references plaid_connections(id) on delete cascade not null` (migration 004). So the
-        // imported bank data for this Item is removed along with the connection.
+        // Deleting the connection DETACHES its transactions but keeps them: since migration 008,
+        // transactions.plaid_connection_id is `on delete set null`, so the DB nulls that FK on the
+        // affected rows instead of cascade-deleting them. The user's spend history survives an
+        // unlink (only a full account deletion purges it). EF isn't tracking those rows, so the
+        // DB-side SET NULL happens without an in-memory conflict.
         _db.PlaidConnections.Remove(connection);
         await _db.SaveChangesAsync();
 

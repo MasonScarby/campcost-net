@@ -72,6 +72,7 @@ Preferred, not strict law — don't block future refactors over layering purity.
 | ✅ Resolved | No active trips = silent black hole — obsolete: sync now stores every transaction in `transactions` (unassigned, `trip_id` NULL) even with no trips; `SyncResult.Warning` only notes there was nothing to auto-assign to |
 | ✅ Resolved | Transactions with no matching trip lost past the cursor — **fixed by the `transactions` table (migration 004)**. Ingestion is decoupled from trips: every delta is stored regardless of trip match, `trip_id` left NULL until claimed. Nothing is ever skipped past the cursor, so no data loss. Unassigned rows are claimed later via auto-assign (trip create/date change) or manual assignment |
 | ⚠️ Low | Timezone drift — 2-day buffer mostly covers it |
+| ✅ Resolved | Disconnecting a bank silently deleted its transaction history (FK was `on delete cascade not null`) — migration 008 makes `transactions.plaid_connection_id` nullable + `on delete set null`, so disconnect now DETACHES and keeps history (only full account deletion purges). `AccountService.DisconnectBankAsync`, `Transaction.cs` |
 
 ## Security & Correctness Issues (Fix Before Go-Live)
 
