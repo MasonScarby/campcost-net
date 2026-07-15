@@ -5,7 +5,7 @@
 // spoofed here — these constants exist only for display copy.
 import { backendFetch } from './api'
 
-export const FREE_TRIP_LIMIT = 1
+export const FREE_TRIP_LIMIT = 3
 export const FREE_MAX_TRIP_DAYS = 7
 export const FREE_TXN_LIMIT = 50 // mirrors FreePlanLimits.MaxAssignedTransactionsPerTrip
 

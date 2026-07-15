@@ -19,6 +19,11 @@ public static class FreePlanLimits
     /// </summary>
     public const int MaxTripDays = 7;
 
+    /// <summary>
+    /// Free plan: a user may have at most this many trips. Pro = unlimited.
+    /// </summary>
+    public const int MaxTripsFree = 3;
+
     /// <summary>Warning surfaced when the assignment cap is hit on the free plan.</summary>
     public const string TransactionCapWarning =
         "Free plan limited to 50 transactions per trip — upgrade for unlimited.";
