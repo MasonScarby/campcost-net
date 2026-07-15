@@ -1098,6 +1098,12 @@ export default function TripDetail() {
                         {it.pending && (
                           <span style={{ fontSize: 11, background: '#fdf0d5', color: '#b07a2a', borderRadius: 6, padding: '1px 7px', fontWeight: 600 }}>Pending</span>
                         )}
+                        {/* Unreviewed (reviewed=false in DB) — incl. transactions freed by a
+                            trip delete and re-claimed by a new trip. Worded "Needs review" so it
+                            doesn't collide with the Plaid unsettled "Pending" badge above. */}
+                        {it.source === 'plaid' && !it.reviewed && (
+                          <span style={{ fontSize: 11, background: '#e7eef2', color: '#4a6b82', borderRadius: 6, padding: '1px 7px', fontWeight: 600 }}>Needs review</span>
+                        )}
                         {it.adjusted && (
                           <span style={{ fontSize: 11, background: '#f5e6c8', color: '#8b5e3c', borderRadius: 6, padding: '1px 7px', fontWeight: 600 }}>
                             {it.adjustmentNote || 'Adjusted'}
