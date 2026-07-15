@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext'
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts'
 
 import { backendFetch } from '../lib/api'
+import { isPro, fetchPlan, FREE_TXN_LIMIT } from '../lib/plan'
 
 const CATEGORY_LABELS = {
   fuel: 'Fuel', campground: 'Campground', food_groceries: 'Food & Groceries',
@@ -36,6 +37,7 @@ export default function TripDetail() {
   const [addingCash, setAddingCash] = useState(false)
   const [syncStatus, setSyncStatus] = useState('idle') // idle | syncing | done
   const [capWarning, setCapWarning] = useState(null) // free-plan 50-txn assignment cap hit
+  const [pro, setPro] = useState(isPro()) // display cache; refreshed from the API on mount
   const [editingId, setEditingId] = useState(null)
   const [editShare, setEditShare] = useState('')
   const [editNote, setEditNote] = useState('')
@@ -113,6 +115,12 @@ export default function TripDetail() {
     fetchAll()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, user.id])
+
+  // Refresh the real plan (server is source of truth) so the transaction counter
+  // shows the correct cap; falls back to the cached value if the backend is down.
+  useEffect(() => {
+    fetchPlan().then(p => setPro(p === 'pro'))
+  }, [])
 
   // Pull an elsewhere-living transaction onto THIS trip. Manual assign may move
   // reviewed rows (only AUTO-assign must respect them); marks reviewed on the way.
@@ -919,7 +927,20 @@ export default function TripDetail() {
       {/* Expenses */}
       <div style={card}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: showResetConfirm ? 12 : 16 }}>
-          <h2 style={{ fontSize: 17, fontWeight: 600, color: '#4a3728', margin: 0 }}>Expenses</h2>
+          <div>
+            <h2 style={{ fontSize: 17, fontWeight: 600, color: '#4a3728', margin: 0 }}>Expenses</h2>
+            {/* Bank-transaction counter. The free cap gates ASSIGNED Plaid rows on this
+                trip — exactly `transactions` — so this count matches what the server enforces. */}
+            <p style={{
+              fontSize: 12, fontWeight: 600, margin: '4px 0 0',
+              color: !pro && transactions.length >= FREE_TXN_LIMIT ? '#d4622a'
+                : !pro && transactions.length >= FREE_TXN_LIMIT * 0.8 ? '#c78a3b' : '#8b5e3c'
+            }}>
+              {pro
+                ? `${transactions.length} bank transaction${transactions.length === 1 ? '' : 's'}`
+                : `${transactions.length} / ${FREE_TXN_LIMIT} bank transactions${transactions.length >= FREE_TXN_LIMIT ? ' · limit reached — upgrade for unlimited' : ''}`}
+            </p>
+          </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={() => setShowResetConfirm(v => !v)} style={{
               background: 'white', color: '#b0a090', border: '1px solid #e8d5b0',
