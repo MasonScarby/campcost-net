@@ -14,12 +14,14 @@ namespace CampCost.Core.Interfaces;
 public interface ITransactionAssignmentService
 {
     /// <summary>
-    /// Auto-assign the user's UNASSIGNED, non-reviewed transactions whose transaction_date
-    /// falls in [trip.StartDate, trip.EndDate] to the given trip. Never touches transactions
-    /// already assigned to another trip, and never moves a reviewed (user-confirmed) row.
-    /// On a free plan, assigns only up to the cap (oldest first) and returns a warning if the
-    /// cap truncated the batch. No-op when the trip has no start/end dates.
-    /// Called when a trip is created or its dates change.
+    /// Reconcile the trip's transactions to its date window, then auto-assign.
+    /// STRICT invariant: a trip contains exactly its [StartDate, EndDate] range. Rows now
+    /// OUTSIDE the window are released exactly like trip-delete releases them (trip_id=null,
+    /// reviewed=false) so any trip can re-claim them — nothing is ever stranded. Then the
+    /// user's UNASSIGNED, non-reviewed in-window transactions are claimed. Never touches
+    /// transactions assigned to another trip. On a free plan, claims only up to the cap
+    /// (oldest first) and returns a warning if the cap truncated the batch. No-op when the
+    /// trip has no start/end dates. Called when a trip is created or its dates change.
     /// </summary>
     Task<AutoAssignResult> AutoAssignForTripAsync(Guid userId, Guid tripId);
 
@@ -54,8 +56,11 @@ public interface ITransactionAssignmentService
     Task<AssignOutcome> SoftDeleteAsync(Guid userId, Guid transactionId);
 }
 
-/// <summary>Result of an auto-assign run: how many were claimed and an optional cap warning.</summary>
-public record AutoAssignResult(int Assigned, string? Warning);
+/// <summary>
+/// Result of an auto-assign run: how many were claimed, how many out-of-window rows were
+/// released back to unassigned (strict date-range reconcile), and an optional cap warning.
+/// </summary>
+public record AutoAssignResult(int Assigned, string? Warning, int Released = 0);
 
 /// <summary>Outcome of a manual assign call.</summary>
 public enum AssignOutcome

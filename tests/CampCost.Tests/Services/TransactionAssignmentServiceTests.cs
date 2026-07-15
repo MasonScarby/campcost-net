@@ -263,4 +263,122 @@ public class TransactionAssignmentServiceTests
 
         result.Should().ContainSingle(t => t.PlaidTransactionId == "unassigned");
     }
+
+    // ── Strict date-range reconcile ─────────────────────────────────────────────
+    // A trip contains exactly its [start, end] window. On create/date-change,
+    // out-of-range rows are released like trip-delete (trip_id=null, reviewed=false).
+
+    [Fact]
+    public async Task Reconcile_ReleasesOutOfRangeUnreviewed_TripIdNullReviewedFalse()
+    {
+        var trip = SeedTrip(startDaysAgo: 10, endDaysAgo: 0);
+        SeedTx("now-outside", tripId: trip.Id, daysAgo: 40); // predates the window
+
+        var result = await _sut.AutoAssignForTripAsync(_userId, trip.Id);
+
+        result.Released.Should().Be(1);
+        var released = await _db.Transactions.SingleAsync(t => t.PlaidTransactionId == "now-outside");
+        released.TripId.Should().BeNull();
+        released.Reviewed.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Reconcile_ReleasesOutOfRangeReviewedToo_StrictSemantics()
+    {
+        var trip = SeedTrip(startDaysAgo: 10, endDaysAgo: 0);
+        SeedTx("confirmed-outside", tripId: trip.Id, daysAgo: 40, reviewed: true);
+
+        var result = await _sut.AutoAssignForTripAsync(_userId, trip.Id);
+
+        result.Released.Should().Be(1);
+        var released = await _db.Transactions.SingleAsync(t => t.PlaidTransactionId == "confirmed-outside");
+        released.TripId.Should().BeNull("strict: the window is the truth, even for confirmed rows");
+        released.Reviewed.Should().BeFalse("released rows must be re-claimable, exactly like trip delete");
+    }
+
+    [Fact]
+    public async Task Reconcile_InRangeRows_ReviewedOrNot_Untouched()
+    {
+        var trip = SeedTrip(startDaysAgo: 10, endDaysAgo: 0);
+        SeedTx("in-unreviewed", tripId: trip.Id, daysAgo: 5);
+        SeedTx("in-reviewed", tripId: trip.Id, daysAgo: 3, reviewed: true);
+
+        var result = await _sut.AutoAssignForTripAsync(_userId, trip.Id);
+
+        result.Released.Should().Be(0);
+        (await _db.Transactions.SingleAsync(t => t.PlaidTransactionId == "in-unreviewed")).TripId.Should().Be(trip.Id);
+        var reviewed = await _db.Transactions.SingleAsync(t => t.PlaidTransactionId == "in-reviewed");
+        reviewed.TripId.Should().Be(trip.Id);
+        reviewed.Reviewed.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Reconcile_OtherTripsRows_NeverReleased()
+    {
+        var trip = SeedTrip(startDaysAgo: 10, endDaysAgo: 0);
+        var otherTrip = Guid.NewGuid();
+        SeedTx("other-trip-outside", tripId: otherTrip, daysAgo: 40); // out of THIS trip's window
+
+        var result = await _sut.AutoAssignForTripAsync(_userId, trip.Id);
+
+        result.Released.Should().Be(0);
+        (await _db.Transactions.SingleAsync()).TripId.Should().Be(otherTrip);
+    }
+
+    [Fact]
+    public async Task Reconcile_DateRoundTrip_RestoresOriginalWindowRows()
+    {
+        // The motivating bug: July→June→July must NOT stack both ranges, and moving
+        // back must restore the original window's transactions.
+        var trip = SeedTrip(startDaysAgo: 10, endDaysAgo: 4);       // "July" window
+        SeedTx("july-tx", tripId: null, daysAgo: 7);
+        SeedTx("june-tx", tripId: null, daysAgo: 37);
+
+        (await _sut.AutoAssignForTripAsync(_userId, trip.Id)).Assigned.Should().Be(1);
+
+        // Move dates to the "June" window
+        trip.StartDate = Today.AddDays(-40);
+        trip.EndDate = Today.AddDays(-34);
+        await _db.SaveChangesAsync();
+        var june = await _sut.AutoAssignForTripAsync(_userId, trip.Id);
+        june.Released.Should().Be(1, "july-tx falls outside the June window");
+        june.Assigned.Should().Be(1, "june-tx is claimed");
+        (await _db.Transactions.SingleAsync(t => t.PlaidTransactionId == "july-tx")).TripId.Should().BeNull();
+        (await _db.Transactions.SingleAsync(t => t.PlaidTransactionId == "june-tx")).TripId.Should().Be(trip.Id);
+
+        // Move back — July's transactions return, June's leave. No stacking, ever.
+        trip.StartDate = Today.AddDays(-10);
+        trip.EndDate = Today.AddDays(-4);
+        await _db.SaveChangesAsync();
+        var back = await _sut.AutoAssignForTripAsync(_userId, trip.Id);
+        back.Released.Should().Be(1);
+        back.Assigned.Should().Be(1);
+        (await _db.Transactions.SingleAsync(t => t.PlaidTransactionId == "july-tx")).TripId.Should().Be(trip.Id);
+        (await _db.Transactions.SingleAsync(t => t.PlaidTransactionId == "june-tx")).TripId.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Reconcile_FreePlan_ReleasedSlotsAreReusableByNewWindow()
+    {
+        // Free plan: a 50-cap-full trip whose window moves entirely must release the old
+        // rows AND fill the new window into the freed slots.
+        var freeSut = new TransactionAssignmentService(
+            _db, new FixedPlanService("free"), NullLogger<TransactionAssignmentService>.Instance);
+        var trip = SeedTrip(startDaysAgo: 100, endDaysAgo: 94); // old window
+        for (var i = 0; i < Core.Services.FreePlanLimits.MaxAssignedTransactionsPerTrip; i++)
+            SeedTx($"old-{i}", tripId: trip.Id, daysAgo: 97);
+
+        // New window with 50 fresh unassigned transactions
+        trip.StartDate = Today.AddDays(-10);
+        trip.EndDate = Today.AddDays(-4);
+        await _db.SaveChangesAsync();
+        for (var i = 0; i < Core.Services.FreePlanLimits.MaxAssignedTransactionsPerTrip; i++)
+            SeedTx($"new-{i}", tripId: null, daysAgo: 7);
+
+        var result = await freeSut.AutoAssignForTripAsync(_userId, trip.Id);
+
+        result.Released.Should().Be(50);
+        result.Assigned.Should().Be(50, "released slots free up capacity for the new window");
+        (await _db.Transactions.CountAsync(t => t.TripId == trip.Id)).Should().Be(50);
+    }
 }
