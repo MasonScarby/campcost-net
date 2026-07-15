@@ -1,3 +1,4 @@
+using CampCost.Core.Entities;
 using CampCost.Core.Interfaces;
 using CampCost.Core.Services;
 using CampCost.Infrastructure.Data;
@@ -27,5 +28,31 @@ public class PlanService : IPlanService
             return PlanPolicy.FreePlan;
 
         return PlanPolicy.IsPro(sub.Plan) ? PlanPolicy.ProPlan : PlanPolicy.FreePlan;
+    }
+
+    public async Task SetPlanAsync(Guid userId, string plan)
+    {
+        // Normalize to the two known plans so a bad string can't land in the DB.
+        var normalized = PlanPolicy.IsPro(plan) ? PlanPolicy.ProPlan : PlanPolicy.FreePlan;
+
+        var sub = await _db.Subscriptions.FirstOrDefaultAsync(s => s.UserId == userId);
+        if (sub is null)
+        {
+            _db.Subscriptions.Add(new Subscription
+            {
+                Id = Guid.NewGuid(),
+                UserId = userId,
+                Plan = normalized,
+                Status = "active",
+                UpdatedAt = DateTime.UtcNow
+            });
+        }
+        else
+        {
+            sub.Plan = normalized;
+            sub.Status = "active";
+            sub.UpdatedAt = DateTime.UtcNow;
+        }
+        await _db.SaveChangesAsync();
     }
 }

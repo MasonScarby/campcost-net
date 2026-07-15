@@ -31,6 +31,8 @@ export default function Account() {
   const [plan, setPlanState] = useState(getPlan)
   const [unassigned, setUnassigned] = useState([])
   const [assignError, setAssignError] = useState('')
+  const [confirmDeleteTxId, setConfirmDeleteTxId] = useState(null)
+  const [deletingTxId, setDeletingTxId] = useState(null)
 
   // Server is the source of truth for the plan; localStorage is just a display cache
   useEffect(() => {
@@ -60,12 +62,60 @@ export default function Account() {
     }
   }
 
-  // Dev-only display toggle — enforcement is server-side (subscriptions table),
-  // so flipping this only changes what the UI shows, never what the API allows.
-  const togglePlan = () => {
+  // Soft-delete only (API sets deleted_at) — financial history is never hard-deleted,
+  // and dedup on plaid_transaction_id keeps the next sync from re-importing it.
+  const deleteTransaction = async (txId) => {
+    setDeletingTxId(txId)
+    setAssignError('')
+    try {
+      const res = await backendFetch(`/api/transactions/${txId}`, { method: 'DELETE' })
+      if (res.ok) {
+        setUnassigned(prev => prev.filter(t => t.id !== txId))
+        setConfirmDeleteTxId(null)
+      } else {
+        const data = await res.json().catch(() => ({}))
+        setAssignError(data.error || `Could not delete (server error ${res.status})`)
+      }
+    } catch {
+      setAssignError('Backend is not running.')
+    } finally {
+      setDeletingTxId(null)
+    }
+  }
+
+  const [planBusy, setPlanBusy] = useState(false)
+  const [planError, setPlanError] = useState('')
+
+  // DEV-ONLY plan toggle. Until Stripe lands (FIXES.md #9) there's no real upgrade path,
+  // so hit the dev-only POST /api/account/plan, which upserts the `subscriptions` row
+  // (the SERVER source of truth PlanService reads) as a privileged role. The browser
+  // never writes `subscriptions` — that endpoint 404s outside Development, so this can't
+  // be used to self-upgrade in production. Writing localStorage alone no longer works:
+  // every page runs fetchPlan() on mount and would overwrite the cache back to the
+  // server's value (that's why the old localStorage-only toggle "stopped switching over").
+  const togglePlan = async () => {
+    if (planBusy) return
+    setPlanBusy(true)
+    setPlanError('')
     const next = plan === 'free' ? 'pro' : 'free'
-    setPlan(next)
-    setPlanState(next)
+    try {
+      const res = await backendFetch('/api/account/plan', {
+        method: 'POST',
+        body: JSON.stringify({ plan: next }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setPlanError(`Couldn't change plan: ${data.error || `server error ${res.status}`}`)
+        return
+      }
+      // Server persisted it — set the plan optimistically (no second round-trip).
+      setPlan(next)
+      setPlanState(next)
+    } catch (err) {
+      setPlanError(err.message === 'Failed to fetch' ? 'Backend is not running.' : err.message)
+    } finally {
+      setPlanBusy(false)
+    }
   }
 
   const fetchConnections = async () => {
@@ -139,16 +189,22 @@ export default function Account() {
             {plan === 'pro' ? 'Pro' : 'Free'}
           </span>
         </div>
+        {planError && (
+          <p style={{ fontSize: 12, color: '#d4622a', background: '#fff5f0', borderRadius: 8, padding: '8px 12px', margin: '0 0 10px' }}>
+            {planError}
+          </p>
+        )}
         {plan === 'free' ? (
           <>
             <p style={{ fontSize: 13, color: '#8b5e3c', marginBottom: 14 }}>
               {loading ? '...' : `${activeTrips} / ${FREE_TRIP_LIMIT} trip${FREE_TRIP_LIMIT !== 1 ? 's' : ''}`} · manual sync only
             </p>
-            <button onClick={togglePlan} style={{
+            <button onClick={togglePlan} disabled={planBusy} style={{
               background: '#2d5a27', color: 'white', border: 'none',
-              borderRadius: 12, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer'
+              borderRadius: 12, padding: '10px 18px', fontSize: 13, fontWeight: 600,
+              cursor: planBusy ? 'not-allowed' : 'pointer', opacity: planBusy ? 0.6 : 1
             }}>
-              Upgrade to Pro — $6/mo
+              {planBusy ? 'Upgrading…' : 'Upgrade to Pro — $6/mo'}
             </button>
           </>
         ) : (
@@ -156,11 +212,12 @@ export default function Account() {
             <p style={{ fontSize: 13, color: '#8b5e3c', marginBottom: 14 }}>
               Unlimited trips · auto-sync · PDF export · cost stats
             </p>
-            <button onClick={togglePlan} style={{
+            <button onClick={togglePlan} disabled={planBusy} style={{
               background: 'none', border: '1px solid #e8d5b0', color: '#8b5e3c',
-              borderRadius: 12, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer'
+              borderRadius: 12, padding: '10px 18px', fontSize: 13, fontWeight: 600,
+              cursor: planBusy ? 'not-allowed' : 'pointer', opacity: planBusy ? 0.6 : 1
             }}>
-              Switch to Free (dev)
+              {planBusy ? 'Switching…' : 'Switch to Free (dev)'}
             </button>
           </>
         )}
@@ -288,21 +345,54 @@ export default function Account() {
           )}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {unassigned.map(t => (
-              <div key={t.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, background: '#f9f5ee', borderRadius: 10, padding: '8px 12px' }}>
-                <div style={{ minWidth: 0 }}>
-                  <p style={{ fontSize: 13, fontWeight: 600, color: '#4a3728', margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {t.merchant_name || t.name || 'Unknown'} · ${Number(t.amount).toFixed(2)}
-                  </p>
-                  <p style={{ fontSize: 11, color: '#8b5e3c', margin: 0 }}>{t.transaction_date}</p>
+              <div key={t.id} style={{ background: '#f9f5ee', borderRadius: 10, padding: '8px 12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                  <div style={{ minWidth: 0 }}>
+                    <p style={{ fontSize: 13, fontWeight: 600, color: '#4a3728', margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {t.merchant_name || t.name || 'Unknown'} · ${Number(t.amount).toFixed(2)}
+                    </p>
+                    <p style={{ fontSize: 11, color: '#8b5e3c', margin: 0 }}>{t.transaction_date}</p>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                    <select
+                      defaultValue=""
+                      onChange={e => assignTransaction(t.id, e.target.value)}
+                      style={{ border: '1px solid #e8d5b0', borderRadius: 8, padding: '6px 8px', fontSize: 12, background: 'white', color: '#4a3728' }}
+                    >
+                      <option value="" disabled>Assign to trip…</option>
+                      {trips.map(tr => <option key={tr.id} value={tr.id}>{tr.name || tr.id.slice(0, 8)}</option>)}
+                    </select>
+                    <button
+                      onClick={() => setConfirmDeleteTxId(confirmDeleteTxId === t.id ? null : t.id)}
+                      title="Delete transaction"
+                      style={{ background: 'none', border: 'none', color: '#c4b5a5', fontSize: 16, cursor: 'pointer', padding: '0 4px', lineHeight: 1 }}
+                    >
+                      ×
+                    </button>
+                  </div>
                 </div>
-                <select
-                  defaultValue=""
-                  onChange={e => assignTransaction(t.id, e.target.value)}
-                  style={{ border: '1px solid #e8d5b0', borderRadius: 8, padding: '6px 8px', fontSize: 12, background: 'white', color: '#4a3728' }}
-                >
-                  <option value="" disabled>Assign to trip…</option>
-                  {trips.map(tr => <option key={tr.id} value={tr.id}>{tr.name || tr.id.slice(0, 8)}</option>)}
-                </select>
+
+                {/* Inline delete confirm — soft-delete via API; never re-imported (dedup) */}
+                {confirmDeleteTxId === t.id && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, background: '#fff5f0', border: '1px solid #f5c5b0', borderRadius: 8, padding: '8px 10px' }}>
+                    <p style={{ fontSize: 12, color: '#d4622a', margin: 0, flex: 1 }}>
+                      Delete this transaction? It won't come back on future syncs.
+                    </p>
+                    <button
+                      onClick={() => deleteTransaction(t.id)}
+                      disabled={deletingTxId === t.id}
+                      style={{ background: '#d4622a', color: 'white', border: 'none', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer', opacity: deletingTxId === t.id ? 0.6 : 1 }}
+                    >
+                      {deletingTxId === t.id ? 'Deleting…' : 'Confirm'}
+                    </button>
+                    <button
+                      onClick={() => setConfirmDeleteTxId(null)}
+                      style={{ background: '#f5e6c8', color: '#8b5e3c', border: 'none', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
           </div>

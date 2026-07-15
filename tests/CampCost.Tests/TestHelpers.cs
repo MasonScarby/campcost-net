@@ -38,6 +38,7 @@ public class FixedPlanService : IPlanService
     private readonly string _plan;
     public FixedPlanService(string plan) => _plan = plan;
     public Task<string> GetPlanAsync(Guid userId) => Task.FromResult(_plan);
+    public Task SetPlanAsync(Guid userId, string plan) => Task.CompletedTask;
 }
 
 /// <summary>ITransactionAssignmentService stub for controller tests that don't exercise assignment.</summary>
@@ -45,7 +46,11 @@ public class NoopAssignmentService : ITransactionAssignmentService
 {
     public Task<AutoAssignResult> AutoAssignForTripAsync(Guid userId, Guid tripId) =>
         Task.FromResult(new AutoAssignResult(0, null));
-    public Task<AssignOutcome> AssignAsync(Guid userId, Guid transactionId, Guid? tripId) =>
+    public Task<AssignOutcome> AssignAsync(Guid userId, Guid transactionId, Guid? tripId, string? category = null) =>
+        Task.FromResult(AssignOutcome.Success);
+    public Task<AssignOutcome> AdjustAsync(Guid userId, Guid transactionId, decimal? adjustedAmount, string? note) =>
+        Task.FromResult(AssignOutcome.Success);
+    public Task<AssignOutcome> SoftDeleteAsync(Guid userId, Guid transactionId) =>
         Task.FromResult(AssignOutcome.Success);
     public Task<IReadOnlyList<Transaction>> GetUnassignedAsync(Guid userId) =>
         Task.FromResult<IReadOnlyList<Transaction>>(new List<Transaction>());
