@@ -27,6 +27,12 @@ public static class InfrastructureServiceExtensions
         dataSourceBuilder.MapEnum<ExpenseCategoryEnum>("expense_category");
         var dataSource = dataSourceBuilder.Build();
 
+        // Encrypts secrets (Plaid access tokens) at rest. Singleton because the EF model caches
+        // the value-converter expression that captures this instance; the key comes from
+        // Encryption:TokenKey (env/user-secrets), never the database. Registered before the
+        // DbContext so DI can inject it into the 2-arg CampCostDbContext constructor.
+        services.AddSingleton<ITokenProtector, AesGcmTokenProtector>();
+
         services.AddDbContext<CampCostDbContext>(options =>
             options.UseNpgsql(dataSource));
 
@@ -48,6 +54,7 @@ public static class InfrastructureServiceExtensions
         // Scoped services (one per HTTP request)
         services.AddScoped<IPlanService, PlanService>();
         services.AddScoped<IPlaidService, PlaidService>();
+        services.AddScoped<IAccountService, AccountService>();
         services.AddScoped<ITransactionSyncService, TransactionSyncService>();
         services.AddScoped<ITransactionAssignmentService, TransactionAssignmentService>();
 

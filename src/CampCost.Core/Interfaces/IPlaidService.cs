@@ -13,6 +13,14 @@ public interface IPlaidService
     /// after the deltas have been successfully applied.
     /// </summary>
     Task<PlaidSyncDelta> SyncTransactionsAsync(string accessToken, string? cursor);
+
+    /// <summary>
+    /// Calls Plaid /item/remove to invalidate the access token and stop all billing/access
+    /// for this Item. Required when a user disconnects a bank or deletes their account.
+    /// Best-effort: throws only on unexpected transport errors — callers should still remove
+    /// local data even if Plaid reports the item already gone.
+    /// </summary>
+    Task RemoveItemAsync(string accessToken);
 }
 
 /// <summary>

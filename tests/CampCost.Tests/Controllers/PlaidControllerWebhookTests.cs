@@ -39,6 +39,7 @@ public class PlaidControllerWebhookTests
             Mock.Of<IPlaidService>(),
             _sync.Object,
             _verifier.Object,
+            Mock.Of<IAccountService>(),
             _db,
             NullLogger<PlaidController>.Instance);
     }

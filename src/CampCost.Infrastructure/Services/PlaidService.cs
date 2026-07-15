@@ -89,6 +89,22 @@ public class PlaidService : IPlaidService
         return new PlaidSyncDelta(added, modified, removed, nextCursor ?? cursor ?? string.Empty);
     }
 
+    public async Task RemoveItemAsync(string accessToken)
+    {
+        var response = await _client.ItemRemoveAsync(new ItemRemoveRequest
+        {
+            AccessToken = accessToken
+        });
+
+        // Going.Plaid surfaces Plaid API errors on the response rather than throwing. An
+        // already-removed item is fine (the goal — token invalid — is achieved); log others
+        // but don't throw, so account/data deletion is never blocked by a Plaid hiccup.
+        if (response.Error is not null)
+            _logger.LogWarning(
+                "Plaid /item/remove returned {ErrorCode}: {ErrorMessage}",
+                response.Error.ErrorCode, response.Error.ErrorMessage);
+    }
+
     private IEnumerable<PlaidTransaction> MapTransactions(IReadOnlyList<Transaction>? transactions)
     {
         foreach (var t in transactions ?? Array.Empty<Transaction>())

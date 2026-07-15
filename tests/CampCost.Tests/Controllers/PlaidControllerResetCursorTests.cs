@@ -33,6 +33,7 @@ public class PlaidControllerResetCursorTests
             Mock.Of<IPlaidService>(),
             Mock.Of<ITransactionSyncService>(),
             Mock.Of<IPlaidWebhookVerifier>(),
+            Mock.Of<IAccountService>(),
             _db,
             NullLogger<PlaidController>.Instance);
     }

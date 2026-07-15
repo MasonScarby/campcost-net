@@ -12,11 +12,13 @@ namespace CampCost.Api.Controllers;
 public class AccountController : ControllerBase
 {
     private readonly IPlanService _plans;
+    private readonly IAccountService _account;
     private readonly IWebHostEnvironment _env;
 
-    public AccountController(IPlanService plans, IWebHostEnvironment env)
+    public AccountController(IPlanService plans, IAccountService account, IWebHostEnvironment env)
     {
         _plans = plans;
+        _account = account;
         _env = env;
     }
 
@@ -50,6 +52,17 @@ public class AccountController : ControllerBase
 
         await _plans.SetPlanAsync(UserId, req.Plan);
         return Ok(new { plan = req.Plan });
+    }
+
+    // DELETE /api/account
+    // Permanently deletes the account and ALL its data (Plaid items removed, every DB row for
+    // the user purged, Supabase auth user deleted). Irreversible. Privacy-compliance + Plaid
+    // production requirement. Keyed off the JWT — a user can only delete their own account.
+    [HttpDelete]
+    public async Task<IActionResult> DeleteAccount()
+    {
+        await _account.DeleteAccountAsync(UserId);
+        return Ok(new { success = true, deleted = true });
     }
 }
 

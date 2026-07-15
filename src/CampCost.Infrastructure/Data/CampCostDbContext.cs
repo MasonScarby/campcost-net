@@ -1,4 +1,5 @@
 using CampCost.Core.Entities;
+using CampCost.Core.Interfaces;
 using Microsoft.EntityFrameworkCore;
 
 namespace CampCost.Infrastructure.Data;
@@ -11,7 +12,26 @@ namespace CampCost.Infrastructure.Data;
 /// </summary>
 public class CampCostDbContext : DbContext
 {
-    public CampCostDbContext(DbContextOptions<CampCostDbContext> options) : base(options) { }
+    private readonly ITokenProtector _tokenProtector;
+
+    // DI selects this ctor (ITokenProtector is registered) — the Plaid access_token column is
+    // encrypted at rest via the value converter in OnModelCreating using the real AES-GCM protector.
+    public CampCostDbContext(DbContextOptions<CampCostDbContext> options, ITokenProtector tokenProtector)
+        : base(options)
+    {
+        _tokenProtector = tokenProtector;
+    }
+
+    // Test / design-time only: in-memory contexts hold no real Plaid tokens. DI never picks this
+    // ctor (the 2-arg one is greedier and fully satisfiable), so production always encrypts.
+    public CampCostDbContext(DbContextOptions<CampCostDbContext> options)
+        : this(options, new PassthroughTokenProtector()) { }
+
+    private sealed class PassthroughTokenProtector : ITokenProtector
+    {
+        public string Protect(string plaintext) => plaintext;
+        public string Unprotect(string stored) => stored;
+    }
 
     public DbSet<Trip> Trips => Set<Trip>();
     public DbSet<Expense> Expenses => Set<Expense>();
@@ -119,7 +139,13 @@ public class CampCostDbContext : DbContext
             e.ToTable("plaid_connections");
             e.Property(p => p.Id).HasColumnName("id");
             e.Property(p => p.UserId).HasColumnName("user_id");
-            e.Property(p => p.AccessToken).HasColumnName("access_token");
+            // Encrypted at rest (AES-256-GCM). The value converter runs on every read/write so
+            // the plaintext token only ever exists in memory; the DB column holds ciphertext.
+            e.Property(p => p.AccessToken)
+             .HasColumnName("access_token")
+             .HasConversion(
+                 v => _tokenProtector.Protect(v),
+                 v => _tokenProtector.Unprotect(v));
             e.Property(p => p.ItemId).HasColumnName("item_id");
             e.Property(p => p.InstitutionName).HasColumnName("institution_name");
             e.Property(p => p.LastSyncAt).HasColumnName("last_sync_at");

@@ -17,7 +17,13 @@ public class Transaction : ISpendLine
 {
     public Guid Id { get; set; }
     public Guid UserId { get; set; }
-    public Guid PlaidConnectionId { get; set; }
+
+    /// <summary>
+    /// The Plaid connection this row was synced from. NULLABLE by design: when a user
+    /// disconnects a bank we keep their spend history and detach it (FK is `on delete set null`,
+    /// migration 008) rather than cascade-deleting it. NULL = the originating bank was unlinked.
+    /// </summary>
+    public Guid? PlaidConnectionId { get; set; }
 
     /// <summary>Plaid's transaction id — settled id after pending→settled reconciliation. UNIQUE (dedup key).</summary>
     public string PlaidTransactionId { get; set; } = string.Empty;

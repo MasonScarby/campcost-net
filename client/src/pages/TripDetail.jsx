@@ -194,6 +194,27 @@ export default function TripDetail() {
     }
   }
 
+  // Re-categorize a bank transaction after it's been reviewed. The assign endpoint takes a
+  // category override (validated server-side against the expense_category enum) and writes it
+  // alongside trip_id — same immutable-mirror-safe path as confirm/remove. Keeps it on this trip.
+  const changeTransactionCategory = async (txnId, category) => {
+    setTxnBusyId(txnId)
+    try {
+      const res = await backendFetch(`/api/transactions/${txnId}/assign`, {
+        method: 'PATCH',
+        body: JSON.stringify({ trip_id: id, category }),
+      })
+      if (res.ok) {
+        setTransactions(prev => prev.map(t => t.id === txnId ? { ...t, category, reviewed: true } : t))
+      } else {
+        const data = await res.json().catch(() => ({}))
+        setEditError(data.error || `Couldn't change category (${res.status})`)
+      }
+    } finally {
+      setTxnBusyId(null)
+    }
+  }
+
   const effectiveAmount = (e) =>
     e.adjusted_amount != null ? Number(e.adjusted_amount) : Number(e.amount)
 
@@ -1094,6 +1115,20 @@ export default function TripDetail() {
                         Bank transaction · original ${it.original.toFixed(2)} · {it.date}
                         {it.reviewed ? ' · reviewed' : ''}
                       </p>
+
+                      {/* Category — re-categorize this bank transaction (persists via the assign API,
+                          works even after it's been reviewed) */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                        <label style={{ fontSize: 12, color: '#8b5e3c', fontWeight: 600, flexShrink: 0 }}>Category</label>
+                        <select
+                          value={it.category || 'misc'}
+                          onChange={e => changeTransactionCategory(it.id, e.target.value)}
+                          disabled={txnBusyId === it.id}
+                          style={{ flex: 1, border: '1px solid #e8d5b0', borderRadius: 10, padding: '8px 10px', fontSize: 14, background: 'white', color: '#4a3728', outline: 'none', opacity: txnBusyId === it.id ? 0.6 : 1 }}
+                        >
+                          {Object.entries(CATEGORY_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                        </select>
+                      </div>
 
                       {/* Quick split presets — computed off the ORIGINAL bank amount */}
                       <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
