@@ -27,10 +27,11 @@ export default function TransactionReview() {
     const fetchUnreviewed = async () => {
       // Explicit columns, NOT select('*'): migration 004 grants column-level SELECT only,
       // and PostgREST expands * to ungranted columns → permission denied → empty queue.
-      // deleted_at filter mirrors the backend's soft-delete query filter.
+      // adjusted_amount/adjustment_note granted by migration 007. deleted_at filter mirrors
+      // the backend's soft-delete query filter.
       const { data: txns } = await supabase
         .from('transactions')
-        .select('id, trip_id, amount, transaction_date, merchant_name, name, category, pending, reviewed, deleted_at')
+        .select('id, trip_id, amount, transaction_date, merchant_name, name, category, pending, reviewed, deleted_at, adjusted_amount, adjustment_note')
         .eq('trip_id', id).eq('reviewed', false).is('deleted_at', null)
         .order('transaction_date', { ascending: false })
 
