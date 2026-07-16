@@ -5,6 +5,7 @@ using CampCost.Infrastructure.Data;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using System.Security.Claims;
 using System.Text.Json.Serialization;
 
@@ -19,17 +20,20 @@ public class TripController : ControllerBase
     private readonly BudgetCalculationService _budget;
     private readonly ITransactionAssignmentService _assignment;
     private readonly IPlanService _plans;
+    private readonly ILogger<TripController> _logger;
 
     public TripController(
         CampCostDbContext db,
         BudgetCalculationService budget,
         ITransactionAssignmentService assignment,
-        IPlanService plans)
+        IPlanService plans,
+        ILogger<TripController> logger)
     {
         _db = db;
         _budget = budget;
         _assignment = assignment;
         _plans = plans;
+        _logger = logger;
     }
 
     // Free plan: reject trips longer than 7 days (exactly 7 allowed). 402 upgrade_required.
@@ -40,6 +44,21 @@ public class TripController : ControllerBase
         return StatusCode(StatusCodes.Status402PaymentRequired, new
         {
             error = PlanPolicy.TripDurationUpgradeMessage,
+            code = "upgrade_required"
+        });
+    }
+
+    // Free-plan cap on the NUMBER of trips. Enforced server-side (the client's
+    // FREE_TRIP_LIMIT is display-only and bypassable). Returns 402 when over the limit.
+    private async Task<IActionResult?> EnforceTripCountAsync()
+    {
+        var plan = await _plans.GetPlanAsync(UserId);
+        if (PlanPolicy.IsPro(plan)) return null;
+        var count = await _db.Trips.CountAsync(t => t.UserId == UserId);
+        if (PlanPolicy.IsTripCountAllowed(plan, count)) return null;
+        return StatusCode(StatusCodes.Status402PaymentRequired, new
+        {
+            error = PlanPolicy.TripCountUpgradeMessage,
             code = "upgrade_required"
         });
     }
@@ -84,7 +103,10 @@ public class TripController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> CreateTrip([FromBody] TripWriteRequest req)
     {
-        // Server-side plan gate: free-plan trips are capped at 7 days.
+        // Server-side plan gates: free plan is capped at 3 trips and 7 days each.
+        var countGate = await EnforceTripCountAsync();
+        if (countGate is not null) return countGate;
+
         var gate = await EnforceTripDurationAsync(req.StartDate, req.EndDate);
         if (gate is not null) return gate;
 
@@ -152,6 +174,44 @@ public class TripController : ControllerBase
 
         var assigned = await _assignment.AutoAssignForTripAsync(UserId, trip.Id);
         return Ok(new { trip, transactions_assigned = assigned.Assigned, warning = assigned.Warning });
+    }
+
+    // DELETE /api/trips/{id}
+    // Deletes a trip and RELEASES its Plaid transactions back to the unassigned pool:
+    // trip_id -> null AND reviewed -> false, so a new trip over the same dates will
+    // auto-claim them again. (The FK alone only nulls trip_id; the transactions would
+    // stay reviewed=true and auto-assign skips reviewed rows — that's the bug this fixes.)
+    // Runs server-side because the browser has read-only RLS on transactions and cannot
+    // write `reviewed`. Manual expenses/budgets/stops belonging to the trip are removed.
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> DeleteTrip(Guid id)
+    {
+        var trip = await _db.Trips.FirstOrDefaultAsync(t => t.Id == id && t.UserId == UserId);
+        if (trip is null) return NotFound();
+
+        // Release the trip's transactions (query filter already excludes soft-deleted rows).
+        var txns = await _db.Transactions
+            .Where(t => t.UserId == UserId && t.TripId == id)
+            .ToListAsync();
+        var now = DateTime.UtcNow;
+        foreach (var tx in txns)
+        {
+            tx.TripId = null;
+            tx.Reviewed = false; // forget the review decision made in this trip's context
+            tx.UpdatedAt = now;
+        }
+
+        // Remove the trip's dependent rows explicitly (no reliance on DB cascade).
+        _db.Expenses.RemoveRange(_db.Expenses.Where(e => e.TripId == id));
+        _db.BudgetCategories.RemoveRange(_db.BudgetCategories.Where(b => b.TripId == id));
+        _db.TripStops.RemoveRange(_db.TripStops.Where(s => s.TripId == id));
+        _db.Trips.Remove(trip);
+
+        await _db.SaveChangesAsync();
+        _logger.LogInformation(
+            "Deleted trip {TripId}; released {Count} transaction(s) to unassigned",
+            id, txns.Count);
+        return Ok(new { released = txns.Count });
     }
 
     // GET /api/trips/{id}/budget

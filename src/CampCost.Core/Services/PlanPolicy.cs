@@ -14,6 +14,9 @@ public static class PlanPolicy
     public const string TripDurationUpgradeMessage =
         "Free plan trips are limited to 7 days. Upgrade to Pro for unlimited trip length.";
 
+    public const string TripCountUpgradeMessage =
+        "Free plan is limited to 3 trips. Upgrade to Pro for unlimited trips.";
+
     public static bool IsPro(string? plan) =>
         string.Equals(plan, ProPlan, StringComparison.OrdinalIgnoreCase);
 
@@ -36,5 +39,16 @@ public static class PlanPolicy
         if (IsPro(plan)) return true;
         var days = TripDurationDays(start, end);
         return days is null || days <= FreePlanLimits.MaxTripDays;
+    }
+
+    /// <summary>
+    /// Free plan: reject creating a new trip once the user already has
+    /// <see cref="FreePlanLimits.MaxTripsFree"/> trips. Pro: always allowed.
+    /// <paramref name="currentTripCount"/> is the user's existing trip count.
+    /// </summary>
+    public static bool IsTripCountAllowed(string? plan, int currentTripCount)
+    {
+        if (IsPro(plan)) return true;
+        return currentTripCount < FreePlanLimits.MaxTripsFree;
     }
 }

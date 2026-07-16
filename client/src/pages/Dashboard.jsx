@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 import { getPlan, fetchPlan, FREE_TRIP_LIMIT } from '../lib/plan'
+import { backendFetch } from '../lib/api'
 
 const STATUS_COLORS = {
   planning: { background: '#f5e6c8', color: '#8b5e3c' },
@@ -74,14 +75,18 @@ export default function Dashboard() {
 
   const deleteTrip = async (tripId) => {
     setDeleting(true)
-    // Delete child rows first (in case no DB cascade is configured)
-    await supabase.from('expenses').delete().eq('trip_id', tripId)
-    await supabase.from('budget_categories').delete().eq('trip_id', tripId)
-    await supabase.from('trip_stops').delete().eq('trip_id', tripId)
-    await supabase.from('trips').delete().eq('id', tripId)
-    setTrips(prev => prev.filter(t => t.id !== tripId))
-    setConfirmDeleteId(null)
-    setDeleting(false)
+    try {
+      // Goes through the API (not direct Supabase) so the server can RELEASE this trip's
+      // transactions back to the pool — trip_id=null AND reviewed=false — which the browser
+      // can't do (read-only RLS on transactions). Without that, they'd stay reviewed=true and
+      // a new same-range trip's auto-assign would skip them → transactions "disappear".
+      const res = await backendFetch(`/api/trips/${tripId}`, { method: 'DELETE' })
+      if (!res.ok) { console.error('delete trip failed:', res.status); return }
+      setTrips(prev => prev.filter(t => t.id !== tripId))
+      setConfirmDeleteId(null)
+    } finally {
+      setDeleting(false)
+    }
   }
 
   const saveFunds = () => {
