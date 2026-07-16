@@ -13,8 +13,12 @@ namespace CampCost.Infrastructure.Services;
 /// never assigned, surfaced, or counted toward the free-plan cap.
 ///
 /// Free plan: a trip may hold at most <see cref="FreePlanLimits.MaxAssignedTransactionsPerTrip"/>
-/// assigned transactions. The cap is enforced by refusing to assign MORE — existing
-/// assignments are never removed or unassigned to make room. Pro plan is uncapped.
+/// assigned transactions. The cap is enforced by refusing to assign MORE — the cap never
+/// removes or unassigns existing data to make room. Pro plan is uncapped.
+///
+/// STRICT date-range invariant: auto-assign first releases rows outside the trip's window
+/// (trip_id=null, reviewed=false — identical to trip-delete semantics), so a trip always
+/// contains exactly its [StartDate, EndDate] range after create/date-change.
 /// </summary>
 public class TransactionAssignmentService : ITransactionAssignmentService
 {
@@ -40,6 +44,24 @@ public class TransactionAssignmentService : ITransactionAssignmentService
 
         var start = trip.StartDate.Value;
         var end = trip.EndDate.Value;
+        var now = DateTime.UtcNow;
+
+        // STRICT reconcile: a trip contains exactly its date range. Rows now OUTSIDE the
+        // window are released the same way trip-delete releases them — trip_id=null AND
+        // reviewed=false — so they're immediately re-claimable by any trip (nothing can be
+        // stranded). This also closes the free-plan leak of stacking two date ranges onto
+        // one trip by moving its dates back and forth.
+        var outOfRange = await _db.Transactions
+            .Where(t => t.UserId == userId
+                        && t.TripId == tripId
+                        && (t.TransactionDate < start || t.TransactionDate > end))
+            .ToListAsync();
+        foreach (var tx in outOfRange)
+        {
+            tx.TripId = null;
+            tx.Reviewed = false; // forget the review decision, exactly like trip delete
+            tx.UpdatedAt = now;
+        }
 
         // Only claim UNASSIGNED, non-reviewed rows in range — never steal from another trip
         // and never move a user-confirmed (reviewed) assignment. Ordered oldest-first so the
@@ -62,8 +84,11 @@ public class TransactionAssignmentService : ITransactionAssignmentService
         if (!PlanPolicy.IsPro(plan))
         {
             // Query filter excludes soft-deleted rows, so this is the live assigned count.
+            // Subtract the just-released rows (not yet saved, so the DB count still includes
+            // them) — slots they occupied are free for the new window's claims.
             var alreadyAssigned = await _db.Transactions
-                .CountAsync(t => t.UserId == userId && t.TripId == tripId);
+                .CountAsync(t => t.UserId == userId && t.TripId == tripId)
+                - outOfRange.Count;
 
             var slots = FreePlanLimits.MaxAssignedTransactionsPerTrip - alreadyAssigned;
             if (slots <= 0)
@@ -78,22 +103,22 @@ public class TransactionAssignmentService : ITransactionAssignmentService
             }
         }
 
-        var now = DateTime.UtcNow;
         foreach (var tx in toAssign)
         {
             tx.TripId = tripId;
             tx.UpdatedAt = now;
         }
 
-        if (toAssign.Count > 0)
+        if (toAssign.Count > 0 || outOfRange.Count > 0)
         {
+            // Releases + claims persist as one unit: the trip is never saved half-reconciled.
             await _db.SaveChangesAsync();
             _logger.LogInformation(
-                "Auto-assigned {Count} unassigned transaction(s) to trip {TripId} (range {Start}..{End}){Capped}",
-                toAssign.Count, tripId, start, end, warning is null ? "" : " — free-plan cap reached");
+                "Reconciled trip {TripId} to range {Start}..{End}: released {Released} out-of-range, auto-assigned {Count}{Capped}",
+                tripId, start, end, outOfRange.Count, toAssign.Count, warning is null ? "" : " — free-plan cap reached");
         }
 
-        return new AutoAssignResult(toAssign.Count, warning);
+        return new AutoAssignResult(toAssign.Count, warning, outOfRange.Count);
     }
 
     public async Task<AssignOutcome> AssignAsync(Guid userId, Guid transactionId, Guid? tripId, string? category = null)

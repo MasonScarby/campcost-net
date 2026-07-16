@@ -172,8 +172,15 @@ public class TripController : ControllerBase
 
         await _db.SaveChangesAsync();
 
+        // Strict reconcile: releases rows now outside the window, then claims the new range.
         var assigned = await _assignment.AutoAssignForTripAsync(UserId, trip.Id);
-        return Ok(new { trip, transactions_assigned = assigned.Assigned, warning = assigned.Warning });
+        return Ok(new
+        {
+            trip,
+            transactions_assigned = assigned.Assigned,
+            transactions_released = assigned.Released,
+            warning = assigned.Warning
+        });
     }
 
     // DELETE /api/trips/{id}

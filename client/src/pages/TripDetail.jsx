@@ -37,6 +37,7 @@ export default function TripDetail() {
   const [addingCash, setAddingCash] = useState(false)
   const [syncStatus, setSyncStatus] = useState('idle') // idle | syncing | done
   const [capWarning, setCapWarning] = useState(null) // free-plan 50-txn assignment cap hit
+  const [reconcileNotice, setReconcileNotice] = useState(null) // date-change released/added summary
   const [pro, setPro] = useState(isPro()) // display cache; refreshed from the API on mount
   const [editingId, setEditingId] = useState(null)
   const [editShare, setEditShare] = useState('')
@@ -371,6 +372,18 @@ export default function TripDetail() {
         error = data
       } else {
         setCapWarning(data.warning ?? null)
+        // Strict reconcile summary — tell the user WHY the spend just changed instead of
+        // letting expenses silently appear/disappear.
+        const released = data.transactions_released ?? 0
+        const added = data.transactions_assigned ?? 0
+        if (released > 0 || added > 0) {
+          const parts = []
+          if (released > 0) parts.push(`${released} transaction${released === 1 ? '' : 's'} outside the new dates moved back to Unassigned`)
+          if (added > 0) parts.push(`${added} new transaction${added === 1 ? '' : 's'} added to this trip`)
+          setReconcileNotice(`Trip updated. ${parts.join(', and ')}.`)
+        } else {
+          setReconcileNotice(null)
+        }
       }
     } catch (err) {
       setDateError(err.message === 'Failed to fetch' ? 'Backend is not running.' : err.message)
@@ -611,6 +624,17 @@ export default function TripDetail() {
           border: '1px solid #f0dfae', borderRadius: 8, padding: '10px 14px', marginBottom: 16
         }}>
           ⚠ {capWarning}
+        </p>
+      )}
+
+      {reconcileNotice && (
+        <p style={{
+          fontSize: 12, color: '#2d5a27', background: '#eef4ea',
+          border: '1px solid #cfe0c5', borderRadius: 8, padding: '10px 14px', marginBottom: 16,
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10
+        }}>
+          <span>{reconcileNotice}</span>
+          <button onClick={() => setReconcileNotice(null)} style={{ background: 'none', border: 'none', color: '#2d5a27', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: 0 }}>×</button>
         </p>
       )}
 
