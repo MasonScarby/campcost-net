@@ -57,6 +57,7 @@ public static class InfrastructureServiceExtensions
         services.AddScoped<IAccountService, AccountService>();
         services.AddScoped<ITransactionSyncService, TransactionSyncService>();
         services.AddScoped<ITransactionAssignmentService, TransactionAssignmentService>();
+        services.AddScoped<IBillingService, StripeBillingService>();
 
         return services;
     }
