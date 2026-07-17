@@ -34,9 +34,34 @@ export default function Account() {
   const [confirmDeleteTxId, setConfirmDeleteTxId] = useState(null)
   const [deletingTxId, setDeletingTxId] = useState(null)
 
+  const [checkoutBanner, setCheckoutBanner] = useState(null)
+
   // Server is the source of truth for the plan; localStorage is just a display cache
   useEffect(() => {
     fetchPlan().then(setPlanState)
+  }, [])
+
+  // Back from Stripe Checkout. The plan flips via the WEBHOOK, which can lag the
+  // redirect by a moment — poll fetchPlan a few times instead of trusting the flag.
+  // (setState deferred to a timeout so the effect body itself stays side-effect-only.)
+  useEffect(() => {
+    const flag = new URLSearchParams(window.location.search).get('checkout')
+    if (!flag) return
+    window.history.replaceState({}, '', '/account') // don't re-trigger on refresh
+    let tries = 0
+    const poll = async () => {
+      const p = await fetchPlan()
+      setPlanState(p)
+      if (p === 'pro') { setCheckoutBanner('success'); return }
+      if (++tries < 5) setTimeout(poll, 2000)
+      else setCheckoutBanner('slow') // webhook hasn't landed after ~10s
+    }
+    const t = setTimeout(() => {
+      if (flag === 'cancelled') { setCheckoutBanner('cancelled'); return }
+      setCheckoutBanner('processing')
+      poll()
+    }, 0)
+    return () => clearTimeout(t)
   }, [])
 
   const fetchUnassigned = async () => {
@@ -86,13 +111,71 @@ export default function Account() {
   const [planBusy, setPlanBusy] = useState(false)
   const [planError, setPlanError] = useState('')
 
-  // DEV-ONLY plan toggle. Until Stripe lands (FIXES.md #9) there's no real upgrade path,
-  // so hit the dev-only POST /api/account/plan, which upserts the `subscriptions` row
-  // (the SERVER source of truth PlanService reads) as a privileged role. The browser
-  // never writes `subscriptions` — that endpoint 404s outside Development, so this can't
-  // be used to self-upgrade in production. Writing localStorage alone no longer works:
-  // every page runs fetchPlan() on mount and would overwrite the cache back to the
-  // server's value (that's why the old localStorage-only toggle "stopped switching over").
+  // Real upgrade: Stripe Checkout (hosted page). The PLAN WRITE happens server-side via
+  // the verified webhook, never from the browser. If Stripe isn't configured yet (503),
+  // fall back to the dev-only toggle so local dev keeps working without keys.
+  const startCheckout = async () => {
+    if (planBusy) return
+    setPlanBusy(true)
+    setPlanError('')
+    try {
+      const res = await backendFetch('/api/billing/checkout', { method: 'POST' })
+      if (res.ok) {
+        const { url } = await res.json()
+        window.location.assign(url) // off to Stripe — page unloads, no state cleanup needed
+        return
+      }
+      if (res.status === 503 && import.meta.env.DEV) {
+        setPlanBusy(false)
+        await togglePlan() // Stripe keys not set in dev — use the dev toggle
+        return
+      }
+      const data = await res.json().catch(() => ({}))
+      setPlanError(data.error || `Couldn't start checkout (server error ${res.status})`)
+    } catch (err) {
+      setPlanError(err.message === 'Failed to fetch' ? 'Backend is not running.' : err.message)
+    } finally {
+      setPlanBusy(false)
+    }
+  }
+
+  // Cancel subscription: period-end cancel via Stripe (user keeps Pro until the paid
+  // period lapses; the subscription.deleted webhook then drops the plan to free). A
+  // dev-toggled Pro (no Stripe sub behind it) downgrades immediately in dev.
+  const [confirmCancel, setConfirmCancel] = useState(false)
+  const [cancelNote, setCancelNote] = useState('')
+  const cancelSubscription = async () => {
+    if (planBusy) return
+    setPlanBusy(true)
+    setPlanError('')
+    try {
+      const res = await backendFetch('/api/billing/cancel', { method: 'POST' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setPlanError(data.error || `Couldn't cancel (server error ${res.status})`)
+        return
+      }
+      if (data.status === 'dev_downgraded') {
+        setPlan('free')
+        setPlanState('free')
+        setCancelNote('')
+      } else {
+        setCancelNote('Cancellation scheduled — Pro stays active until the end of your billing period.')
+      }
+      setConfirmCancel(false)
+    } catch (err) {
+      setPlanError(err.message === 'Failed to fetch' ? 'Backend is not running.' : err.message)
+    } finally {
+      setPlanBusy(false)
+    }
+  }
+
+  // DEV-ONLY plan toggle. Hits the dev-only POST /api/account/plan, which upserts the
+  // `subscriptions` row (the SERVER source of truth PlanService reads) as a privileged
+  // role. The browser never writes `subscriptions` — that endpoint 404s outside
+  // Development, so this can't be used to self-upgrade in production. Writing
+  // localStorage alone no longer works: every page runs fetchPlan() on mount and would
+  // overwrite the cache back to the server's value.
   const togglePlan = async () => {
     if (planBusy) return
     setPlanBusy(true)
@@ -194,17 +277,29 @@ export default function Account() {
             {planError}
           </p>
         )}
+        {checkoutBanner && (
+          <p style={{
+            fontSize: 12, borderRadius: 8, padding: '8px 12px', margin: '0 0 10px',
+            color: checkoutBanner === 'success' ? '#2d5a27' : checkoutBanner === 'cancelled' ? '#8b5e3c' : '#8a5a00',
+            background: checkoutBanner === 'success' ? '#eef4ea' : checkoutBanner === 'cancelled' ? '#f5e6c8' : '#fff7e0'
+          }}>
+            {checkoutBanner === 'success' && '✓ Welcome to Pro! Your subscription is active.'}
+            {checkoutBanner === 'processing' && 'Payment received — activating your subscription…'}
+            {checkoutBanner === 'cancelled' && 'Checkout cancelled — no charge was made.'}
+            {checkoutBanner === 'slow' && 'Payment received. Activation is taking longer than usual — refresh in a minute.'}
+          </p>
+        )}
         {plan === 'free' ? (
           <>
             <p style={{ fontSize: 13, color: '#8b5e3c', marginBottom: 14 }}>
               {loading ? '...' : `${activeTrips} / ${FREE_TRIP_LIMIT} trip${FREE_TRIP_LIMIT !== 1 ? 's' : ''}`} · manual sync only
             </p>
-            <button onClick={togglePlan} disabled={planBusy} style={{
+            <button onClick={startCheckout} disabled={planBusy} style={{
               background: '#2d5a27', color: 'white', border: 'none',
               borderRadius: 12, padding: '10px 18px', fontSize: 13, fontWeight: 600,
               cursor: planBusy ? 'not-allowed' : 'pointer', opacity: planBusy ? 0.6 : 1
             }}>
-              {planBusy ? 'Upgrading…' : 'Upgrade to Pro — $6/mo'}
+              {planBusy ? 'Redirecting…' : 'Upgrade to Pro — $6/mo'}
             </button>
           </>
         ) : (
@@ -212,13 +307,37 @@ export default function Account() {
             <p style={{ fontSize: 13, color: '#8b5e3c', marginBottom: 14 }}>
               Unlimited trips · auto-sync · PDF export · cost stats
             </p>
-            <button onClick={togglePlan} disabled={planBusy} style={{
-              background: 'none', border: '1px solid #e8d5b0', color: '#8b5e3c',
-              borderRadius: 12, padding: '10px 18px', fontSize: 13, fontWeight: 600,
-              cursor: planBusy ? 'not-allowed' : 'pointer', opacity: planBusy ? 0.6 : 1
-            }}>
-              {planBusy ? 'Switching…' : 'Switch to Free (dev)'}
-            </button>
+            {cancelNote ? (
+              <p style={{ fontSize: 12, color: '#8b5e3c', background: '#f5e6c8', borderRadius: 8, padding: '8px 12px', margin: 0 }}>
+                {cancelNote}
+              </p>
+            ) : confirmCancel ? (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 13, color: '#4a3728', fontWeight: 600 }}>
+                  Cancel Pro? You keep it until your billing period ends.
+                </span>
+                <button onClick={cancelSubscription} disabled={planBusy} style={{
+                  background: '#d4622a', color: 'white', border: 'none',
+                  borderRadius: 12, padding: '8px 16px', fontSize: 13, fontWeight: 600,
+                  cursor: planBusy ? 'not-allowed' : 'pointer', opacity: planBusy ? 0.6 : 1
+                }}>
+                  {planBusy ? 'Cancelling…' : 'Yes, cancel'}
+                </button>
+                <button onClick={() => setConfirmCancel(false)} disabled={planBusy} style={{
+                  background: 'none', border: '1px solid #e8d5b0', color: '#8b5e3c',
+                  borderRadius: 12, padding: '8px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer'
+                }}>
+                  Keep Pro
+                </button>
+              </div>
+            ) : (
+              <button onClick={() => setConfirmCancel(true)} style={{
+                background: 'none', border: '1px solid #e8d5b0', color: '#8b5e3c',
+                borderRadius: 12, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer'
+              }}>
+                Cancel subscription
+              </button>
+            )}
           </>
         )}
       </div>

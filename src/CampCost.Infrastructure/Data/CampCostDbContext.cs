@@ -190,6 +190,7 @@ public class CampCostDbContext : DbContext
             e.Property(s => s.UserId).HasColumnName("user_id");
             e.Property(s => s.Plan).HasColumnName("plan");
             e.Property(s => s.Status).HasColumnName("status");
+            e.Property(s => s.StripeCustomerId).HasColumnName("stripe_customer_id");
             // NOTE: the subscriptions table has updated_at, not created_at (see 001_init.sql)
             e.Property(s => s.UpdatedAt).HasColumnName("updated_at");
         });

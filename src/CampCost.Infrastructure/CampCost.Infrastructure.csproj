@@ -7,6 +7,7 @@
   <ItemGroup>
     <PackageReference Include="Going.Plaid" Version="6.63.0" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="8.0.0" />
+    <PackageReference Include="Stripe.net" Version="52.1.1" />
   </ItemGroup>
 
   <PropertyGroup>
