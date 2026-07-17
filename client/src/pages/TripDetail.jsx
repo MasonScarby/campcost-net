@@ -71,6 +71,7 @@ export default function TripDetail() {
   const [showAddStop, setShowAddStop] = useState(false)
   const [stopForm, setStopForm] = useState({ location: '', type: 'campground', arrival_date: '', departure_date: '', cost_per_night: '', notes: '' })
   const [savingStop, setSavingStop] = useState(false)
+  const [stopError, setStopError] = useState('')
 
   // In-window transactions NOT on this trip (other trips or unassigned, incl. reviewed).
   // The .or() is needed because trip_id.neq alone excludes NULLs in SQL.
@@ -342,6 +343,11 @@ export default function TripDetail() {
       setStops(prev => [...prev, data].sort((a, b) => (a.arrival_date || '').localeCompare(b.arrival_date || '')))
       setStopForm({ location: '', type: 'campground', arrival_date: '', departure_date: '', cost_per_night: '', notes: '' })
       setShowAddStop(false)
+      setStopError('')
+    } else {
+      // NEVER fail silently — permission/RLS errors (e.g. missing grants, migration 010)
+      // otherwise look like "the button does nothing".
+      setStopError(error?.message || 'Could not save the stop. Please try again.')
     }
     setSavingStop(false)
   }
@@ -824,6 +830,9 @@ export default function TripDetail() {
               >
                 {savingStop ? 'Saving...' : 'Add stop'}
               </button>
+              {stopError && (
+                <p style={{ fontSize: 12, color: '#d4622a', margin: 0 }}>⚠ {stopError}</p>
+              )}
             </div>
           </div>
         )}
