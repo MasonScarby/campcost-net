@@ -139,6 +139,37 @@ export default function Account() {
     }
   }
 
+  // Cancel subscription: period-end cancel via Stripe (user keeps Pro until the paid
+  // period lapses; the subscription.deleted webhook then drops the plan to free). A
+  // dev-toggled Pro (no Stripe sub behind it) downgrades immediately in dev.
+  const [confirmCancel, setConfirmCancel] = useState(false)
+  const [cancelNote, setCancelNote] = useState('')
+  const cancelSubscription = async () => {
+    if (planBusy) return
+    setPlanBusy(true)
+    setPlanError('')
+    try {
+      const res = await backendFetch('/api/billing/cancel', { method: 'POST' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setPlanError(data.error || `Couldn't cancel (server error ${res.status})`)
+        return
+      }
+      if (data.status === 'dev_downgraded') {
+        setPlan('free')
+        setPlanState('free')
+        setCancelNote('')
+      } else {
+        setCancelNote('Cancellation scheduled — Pro stays active until the end of your billing period.')
+      }
+      setConfirmCancel(false)
+    } catch (err) {
+      setPlanError(err.message === 'Failed to fetch' ? 'Backend is not running.' : err.message)
+    } finally {
+      setPlanBusy(false)
+    }
+  }
+
   // DEV-ONLY plan toggle. Hits the dev-only POST /api/account/plan, which upserts the
   // `subscriptions` row (the SERVER source of truth PlanService reads) as a privileged
   // role. The browser never writes `subscriptions` — that endpoint 404s outside
@@ -276,13 +307,35 @@ export default function Account() {
             <p style={{ fontSize: 13, color: '#8b5e3c', marginBottom: 14 }}>
               Unlimited trips · auto-sync · PDF export · cost stats
             </p>
-            {import.meta.env.DEV && (
-              <button onClick={togglePlan} disabled={planBusy} style={{
+            {cancelNote ? (
+              <p style={{ fontSize: 12, color: '#8b5e3c', background: '#f5e6c8', borderRadius: 8, padding: '8px 12px', margin: 0 }}>
+                {cancelNote}
+              </p>
+            ) : confirmCancel ? (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 13, color: '#4a3728', fontWeight: 600 }}>
+                  Cancel Pro? You keep it until your billing period ends.
+                </span>
+                <button onClick={cancelSubscription} disabled={planBusy} style={{
+                  background: '#d4622a', color: 'white', border: 'none',
+                  borderRadius: 12, padding: '8px 16px', fontSize: 13, fontWeight: 600,
+                  cursor: planBusy ? 'not-allowed' : 'pointer', opacity: planBusy ? 0.6 : 1
+                }}>
+                  {planBusy ? 'Cancelling…' : 'Yes, cancel'}
+                </button>
+                <button onClick={() => setConfirmCancel(false)} disabled={planBusy} style={{
+                  background: 'none', border: '1px solid #e8d5b0', color: '#8b5e3c',
+                  borderRadius: 12, padding: '8px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer'
+                }}>
+                  Keep Pro
+                </button>
+              </div>
+            ) : (
+              <button onClick={() => setConfirmCancel(true)} style={{
                 background: 'none', border: '1px solid #e8d5b0', color: '#8b5e3c',
-                borderRadius: 12, padding: '10px 18px', fontSize: 13, fontWeight: 600,
-                cursor: planBusy ? 'not-allowed' : 'pointer', opacity: planBusy ? 0.6 : 1
+                borderRadius: 12, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer'
               }}>
-                {planBusy ? 'Switching…' : 'Switch to Free (dev)'}
+                Cancel subscription
               </button>
             )}
           </>

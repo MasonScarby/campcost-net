@@ -103,6 +103,32 @@ public class StripeBillingService : IBillingService
         }
     }
 
+    public async Task<bool> CancelAtPeriodEndAsync(Guid userId)
+    {
+        var row = await _db.Subscriptions.FirstOrDefaultAsync(s => s.UserId == userId);
+        if (row?.StripeCustomerId is null) return false; // no Stripe-backed subscription
+
+        var client = new StripeClient(_secretKey);
+        var subService = new SubscriptionService(client);
+        var subs = await subService.ListAsync(new SubscriptionListOptions
+        {
+            Customer = row.StripeCustomerId,
+            Status = "active",
+            Limit = 5,
+        });
+        var found = false;
+        foreach (var sub in subs)
+        {
+            // Period-end cancel: user keeps what they paid for; the subscription.deleted
+            // webhook flips the plan to free when the period actually lapses.
+            await subService.UpdateAsync(sub.Id, new SubscriptionUpdateOptions { CancelAtPeriodEnd = true });
+            found = true;
+        }
+        if (found)
+            _logger.LogInformation("Scheduled period-end cancellation for user {UserId}", userId);
+        return found;
+    }
+
     private async Task UpsertAsync(Guid userId, string plan, string status, string? customerId)
     {
         var row = await _db.Subscriptions.FirstOrDefaultAsync(s => s.UserId == userId);

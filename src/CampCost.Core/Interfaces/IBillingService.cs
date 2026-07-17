@@ -21,4 +21,12 @@ public interface IBillingService
     /// (for structured logging — never contains tokens or PII).
     /// </summary>
     Task<string> HandleWebhookAsync(string json, string signatureHeader);
+
+    /// <summary>
+    /// Cancels the user's Stripe subscription AT PERIOD END (they keep Pro until the time
+    /// they've paid for runs out; the subscription.deleted webhook then drops them to free).
+    /// Returns false when the user has no active Stripe subscription (e.g. a dev-toggled
+    /// plan) — the caller decides what that means.
+    /// </summary>
+    Task<bool> CancelAtPeriodEndAsync(Guid userId);
 }

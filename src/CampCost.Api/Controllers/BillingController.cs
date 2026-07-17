@@ -11,11 +11,16 @@ namespace CampCost.Api.Controllers;
 public class BillingController : ControllerBase
 {
     private readonly IBillingService _billing;
+    private readonly IPlanService _plans;
+    private readonly IWebHostEnvironment _env;
     private readonly ILogger<BillingController> _logger;
 
-    public BillingController(IBillingService billing, ILogger<BillingController> logger)
+    public BillingController(
+        IBillingService billing, IPlanService plans, IWebHostEnvironment env, ILogger<BillingController> logger)
     {
         _billing = billing;
+        _plans = plans;
+        _env = env;
         _logger = logger;
     }
 
@@ -43,6 +48,29 @@ public class BillingController : ControllerBase
             _logger.LogWarning(ex, "Checkout requested but Stripe is not configured");
             return StatusCode(503, new { error = "Payments are not available yet." });
         }
+    }
+
+    // POST /api/billing/cancel
+    // Period-end cancellation: the user keeps Pro until the paid period lapses, then the
+    // subscription.deleted webhook drops the plan to free. There is deliberately NO
+    // instant self-serve downgrade — the plan write path stays webhook-only in prod.
+    // Dev fallback: a dev-toggled Pro (no Stripe subscription) just flips back to free.
+    [HttpPost("cancel")]
+    [Authorize]
+    public async Task<IActionResult> Cancel()
+    {
+        var cancelled = await _billing.CancelAtPeriodEndAsync(UserId);
+        if (cancelled)
+            return Ok(new { status = "cancel_at_period_end" });
+
+        if (_env.IsDevelopment())
+        {
+            // No Stripe subscription behind this Pro (dev toggle) — drop it directly.
+            await _plans.SetPlanAsync(UserId, "free");
+            return Ok(new { status = "dev_downgraded" });
+        }
+
+        return NotFound(new { error = "No active subscription found." });
     }
 
     // POST /api/billing/webhook
