@@ -20,6 +20,7 @@ public class TripController : ControllerBase
     private readonly BudgetCalculationService _budget;
     private readonly ITransactionAssignmentService _assignment;
     private readonly IPlanService _plans;
+    private readonly FuelEstimateService _fuel;
     private readonly ILogger<TripController> _logger;
 
     public TripController(
@@ -27,12 +28,14 @@ public class TripController : ControllerBase
         BudgetCalculationService budget,
         ITransactionAssignmentService assignment,
         IPlanService plans,
+        FuelEstimateService fuel,
         ILogger<TripController> logger)
     {
         _db = db;
         _budget = budget;
         _assignment = assignment;
         _plans = plans;
+        _fuel = fuel;
         _logger = logger;
     }
 
@@ -278,6 +281,76 @@ public class TripController : ControllerBase
         return Ok(breakdown);
     }
 
+    // POST /api/trips/{id}/fuel-estimate
+    // Pre-trip fuel cost: miles / mpg × seeded state average price, per leg.
+    // Legs default to one leg of the trip's total_miles at the national average.
+    // apply=true upserts the result as the trip's `fuel` budget category.
+    [HttpPost("{id:guid}/fuel-estimate")]
+    public async Task<IActionResult> EstimateFuel(Guid id, [FromBody] FuelEstimateRequest req)
+    {
+        var trip = await _db.Trips
+            .Include(t => t.BudgetCategories)
+            .FirstOrDefaultAsync(t => t.Id == id && t.UserId == UserId);
+        if (trip is null) return NotFound();
+
+        var legs = req.Legs is { Count: > 0 }
+            ? req.Legs.Select(l => new FuelEstimateService.LegInput(l.Miles, l.State)).ToList()
+            : trip.TotalMiles is > 0
+                ? new List<FuelEstimateService.LegInput> { new(trip.TotalMiles.Value, null) }
+                : null;
+        if (legs is null)
+            return BadRequest(new { error = "provide legs, or set the trip's total_miles first" });
+
+        FuelEstimateService.FuelEstimate estimate;
+        try
+        {
+            estimate = _fuel.Estimate(legs, req.Mpg, req.FuelType ?? FuelEstimateService.Gas);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+
+        var applied = false;
+        if (req.Apply)
+        {
+            var fuelRow = trip.BudgetCategories.FirstOrDefault(bc => bc.Category == "fuel");
+            if (fuelRow is not null)
+            {
+                fuelRow.PlannedAmount = estimate.TotalCost;
+            }
+            else
+            {
+                // First category row on a total_budget-only trip would silently shrink the
+                // planned budget (category rows override total_budget when any exist), so
+                // park the remainder in `misc` to keep the planned total intact.
+                if (trip.BudgetCategories.Count == 0 && trip.TotalBudget > estimate.TotalCost)
+                {
+                    _db.BudgetCategories.Add(new BudgetCategory
+                    {
+                        Id = Guid.NewGuid(),
+                        TripId = trip.Id,
+                        Category = "misc",
+                        PlannedAmount = trip.TotalBudget - estimate.TotalCost,
+                        CreatedAt = DateTime.UtcNow
+                    });
+                }
+                _db.BudgetCategories.Add(new BudgetCategory
+                {
+                    Id = Guid.NewGuid(),
+                    TripId = trip.Id,
+                    Category = "fuel",
+                    PlannedAmount = estimate.TotalCost,
+                    CreatedAt = DateTime.UtcNow
+                });
+            }
+            await _db.SaveChangesAsync();
+            applied = true;
+        }
+
+        return Ok(new { estimate, applied });
+    }
+
     /// <summary>
     /// A trip's spend lines: Plaid transactions assigned to the trip (soft-deleted rows
     /// excluded by the global query filter) plus manual expenses. Both implement ISpendLine.
@@ -307,4 +380,17 @@ public record TripWriteRequest(
     [property: JsonPropertyName("total_miles")] decimal? TotalMiles,
     [property: JsonPropertyName("status")] string? Status,
     [property: JsonPropertyName("budgets")] Dictionary<string, decimal>? Budgets
+);
+
+// Legs are optional — omitted, the trip's total_miles becomes one national-average leg.
+public record FuelEstimateRequest(
+    [property: JsonPropertyName("mpg")] decimal Mpg,
+    [property: JsonPropertyName("fuel_type")] string? FuelType,
+    [property: JsonPropertyName("legs")] List<FuelLegRequest>? Legs,
+    [property: JsonPropertyName("apply")] bool Apply
+);
+
+public record FuelLegRequest(
+    [property: JsonPropertyName("miles")] decimal Miles,
+    [property: JsonPropertyName("state")] string? State
 );

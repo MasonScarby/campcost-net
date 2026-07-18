@@ -46,6 +46,7 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<TransactionCategorizationService>();
         services.AddSingleton<TransactionMatchingService>();
         services.AddSingleton<BudgetCalculationService>();
+        services.AddSingleton<FuelEstimateService>();
 
         // Webhook signature verification — singleton so the Plaid verification-key
         // cache survives across requests.

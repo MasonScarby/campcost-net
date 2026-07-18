@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext'
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts'
 
 import { backendFetch } from '../lib/api'
+import FuelEstimator from '../components/FuelEstimator'
 import { isPro, fetchPlan, FREE_TXN_LIMIT } from '../lib/plan'
 
 const CATEGORY_LABELS = {
@@ -753,6 +754,16 @@ export default function TripDetail() {
           </div>
         )}
       </div>
+
+      <FuelEstimator
+        tripId={id}
+        totalMiles={trip.total_miles}
+        onApplied={async () => {
+          // the apply endpoint may have written fuel (and a misc remainder) category rows
+          const { data: b } = await supabase.from('budget_categories').select('*').eq('trip_id', id)
+          setBudgets(b ?? [])
+        }}
+      />
 
       {/* Campground Stops */}
       <div style={card}>

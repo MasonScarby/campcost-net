@@ -21,7 +21,7 @@ public class TripControllerPlanGateTests
     {
         db = TestHelpers.NewDb();
         var controller = new TripController(
-            db, new BudgetCalculationService(), new NoopAssignmentService(), new FixedPlanService(plan),
+            db, new BudgetCalculationService(), new NoopAssignmentService(), new FixedPlanService(plan), new FuelEstimateService(),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<TripController>.Instance);
         controller.SetUser(UserId);
         return controller;

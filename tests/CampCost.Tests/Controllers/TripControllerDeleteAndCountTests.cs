@@ -24,7 +24,7 @@ public class TripControllerDeleteAndCountTests
     {
         db = TestHelpers.NewDb();
         var controller = new TripController(
-            db, new BudgetCalculationService(), new NoopAssignmentService(), new FixedPlanService(plan),
+            db, new BudgetCalculationService(), new NoopAssignmentService(), new FixedPlanService(plan), new FuelEstimateService(),
             NullLogger<TripController>.Instance);
         controller.SetUser(UserId);
         return controller;
