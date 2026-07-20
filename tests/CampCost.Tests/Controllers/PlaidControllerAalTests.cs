@@ -1,3 +1,4 @@
+using CampCost.Api.Contracts;
 using CampCost.Api.Controllers;
 using CampCost.Core.Interfaces;
 using FluentAssertions;

@@ -1,8 +1,8 @@
+using CampCost.Api.Contracts;
 using CampCost.Core.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using System.Security.Claims;
-using System.Text.Json.Serialization;
 
 namespace CampCost.Api.Controllers;
 
@@ -65,5 +65,3 @@ public class AccountController : ControllerBase
         return Ok(new { success = true, deleted = true });
     }
 }
-
-public record SetPlanRequest([property: JsonPropertyName("plan")] string Plan);

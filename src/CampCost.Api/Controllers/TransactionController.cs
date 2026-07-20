@@ -1,9 +1,9 @@
+using CampCost.Api.Contracts;
 using CampCost.Core.Interfaces;
 using CampCost.Core.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using System.Security.Claims;
-using System.Text.Json.Serialization;
 
 namespace CampCost.Api.Controllers;
 
@@ -103,13 +103,3 @@ public class TransactionController : ControllerBase
         };
     }
 }
-
-public record AssignRequest(
-    [property: JsonPropertyName("trip_id")] Guid? TripId,
-    [property: JsonPropertyName("category")] string? Category = null
-);
-
-public record AdjustRequest(
-    [property: JsonPropertyName("adjusted_amount")] decimal? AdjustedAmount,
-    [property: JsonPropertyName("adjustment_note")] string? AdjustmentNote = null
-);
