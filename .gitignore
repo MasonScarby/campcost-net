@@ -26,3 +26,6 @@ client/.env.local
 # NuGet
 *.nupkg
 packages/
+
+# Claude Code agent worktrees (local scratch)
+.claude/worktrees/
