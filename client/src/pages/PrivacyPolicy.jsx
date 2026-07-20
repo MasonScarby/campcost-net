@@ -89,7 +89,7 @@ export default function PrivacyPolicy() {
       <h2 style={h2}>Contact</h2>
       <p>
         Questions about your privacy? Email{' '}
-        <a href="mailto:madoncs522@gmail.com" style={{ color: '#8b5e3c', fontWeight: 600 }}>madoncs522@gmail.com</a>.
+        <a href="mailto:campcost.founder@gmail.com" style={{ color: '#8b5e3c', fontWeight: 600 }}>campcost.founder@gmail.com</a>.
       </p>
     </div>
   )

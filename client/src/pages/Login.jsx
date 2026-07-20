@@ -95,8 +95,8 @@ export default function Login() {
             {/* Support-driven 2FA reset — self-serve removal would defeat the second factor */}
             <p className="text-[#b0a090] text-xs" style={{ marginTop: 14, textAlign: 'center' }}>
               Lost your authenticator? Email{' '}
-              <a href="mailto:madoncs522@gmail.com?subject=CampCost%202FA%20reset" className="underline text-[#8b5e3c]">
-                madoncs522@gmail.com
+              <a href="mailto:campcost.founder@gmail.com?subject=CampCost%202FA%20reset" className="underline text-[#8b5e3c]">
+                campcost.founder@gmail.com
               </a>{' '}
               from your account email to reset it.
             </p>
