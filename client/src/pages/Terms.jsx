@@ -90,7 +90,7 @@ export default function Terms() {
       <h2 style={h2}>12. Contact</h2>
       <p>
         Questions about these Terms? Email{' '}
-        <a href="mailto:campcost.founder@gmail.com" style={{ color: '#8b5e3c', fontWeight: 600 }}>campcost.founder@gmail.com</a>.
+        <a href="mailto:hello@campcost.net" style={{ color: '#8b5e3c', fontWeight: 600 }}>hello@campcost.net</a>.
       </p>
     </div>
   )
