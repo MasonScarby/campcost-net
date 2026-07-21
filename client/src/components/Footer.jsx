@@ -17,7 +17,7 @@ export default function Footer() {
       {user && (
         <p style={{ fontSize: 13, color: '#b0a090', margin: '0 0 6px' }}>
           Questions or feedback?{' '}
-          <a href="mailto:madoncs522@gmail.com" style={linkStyle}>madoncs522@gmail.com</a>
+          <a href="mailto:hello@campcost.net" style={linkStyle}>hello@campcost.net</a>
           {' · '}
           <a href="https://www.linkedin.com/in/mason-scarborough-1a0667299/" target="_blank" rel="noopener noreferrer" style={linkStyle}>
             LinkedIn

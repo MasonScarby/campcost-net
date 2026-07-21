@@ -119,7 +119,7 @@ export default function MfaSetup({ onReady }) {
           </p>
           <p style={{ fontSize: 12, color: '#8b5e3c', margin: 0 }}>
             Tip: Apple Passwords / Google Password Manager sync your codes across devices —
-            use one so a lost phone doesn't lock you out. (Locked out anyway? Email madoncs522@gmail.com.)
+            use one so a lost phone doesn't lock you out. (Locked out anyway? Email campcost.founder@gmail.com.)
           </p>
           <img
             src={enrollment.qrCode}
