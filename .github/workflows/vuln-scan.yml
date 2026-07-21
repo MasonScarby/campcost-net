@@ -1,0 +1,54 @@
+name: Vulnerability Scan
+
+# Software-composition (dependency) scanning for the API and frontend.
+# Runs on every push/PR AND weekly, so newly-disclosed vulnerabilities in
+# already-merged dependencies are caught even without a code change.
+on:
+  push:
+    branches: ["*"]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 13 * * 1" # Mondays 13:00 UTC — weekly re-scan of the default branch
+
+jobs:
+  dotnet-audit:
+    name: .NET dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Restore
+        run: dotnet restore
+      - name: Scan for vulnerable NuGet packages
+        run: |
+          set -o pipefail
+          echo "Scanning direct + transitive dependencies..."
+          out=$(dotnet list package --vulnerable --include-transitive 2>&1 | tee /dev/stderr)
+          if echo "$out" | grep -qiE 'has the following vulnerable packages|Critical|High|Moderate'; then
+            echo "::error::Vulnerable NuGet packages detected — remediate per the patch SLA in docs/INFORMATION-SECURITY-POLICY.md"
+            exit 1
+          fi
+          echo "No vulnerable NuGet packages found."
+
+  npm-audit:
+    name: Frontend dependency audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: npm audit (fail on high/critical)
+        run: npm audit --audit-level=high
