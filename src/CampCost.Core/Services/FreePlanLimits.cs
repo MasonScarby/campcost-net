@@ -17,7 +17,7 @@ public static class FreePlanLimits
     /// Free plan: trips may span at most this many days (inclusive of start and end —
     /// a same-day trip is 1 day). Pro = unlimited.
     /// </summary>
-    public const int MaxTripDays = 7;
+    public const int MaxTripDays = 12;
 
     /// <summary>
     /// Free plan: a user may have at most this many trips. Pro = unlimited.

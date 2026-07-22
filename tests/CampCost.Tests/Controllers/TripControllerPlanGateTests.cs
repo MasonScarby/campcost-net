@@ -10,7 +10,7 @@ namespace CampCost.Tests.Controllers;
 
 /// <summary>
 /// Server-side 7-day trip gate on POST /api/trips and PUT /api/trips/{id}.
-/// Free plan trips longer than 7 days must be rejected with 402 Payment Required
+/// Free plan trips longer than 12 days must be rejected with 402 Payment Required
 /// and code "upgrade_required" — and nothing may be written to the DB when rejected.
 /// </summary>
 public class TripControllerPlanGateTests
@@ -32,13 +32,13 @@ public class TripControllerPlanGateTests
         new("Test trip", null, start, end, null, null, null, null);
 
     [Fact]
-    public async Task Free_plan_trip_over_7_days_returns_402_with_upgrade_code()
+    public async Task Free_plan_trip_over_12_days_returns_402_with_upgrade_code()
     {
         var controller = NewController("free", out var db);
         using (db)
         {
-            // 8 days inclusive
-            var result = await controller.CreateTrip(Request(Start, Start.AddDays(7)));
+            // 13 days inclusive
+            var result = await controller.CreateTrip(Request(Start, Start.AddDays(12)));
 
             var status = result.Should().BeOfType<ObjectResult>().Subject;
             status.StatusCode.Should().Be(402);
@@ -48,13 +48,13 @@ public class TripControllerPlanGateTests
     }
 
     [Fact]
-    public async Task Free_plan_trip_of_exactly_7_days_is_allowed()
+    public async Task Free_plan_trip_of_exactly_12_days_is_allowed()
     {
         var controller = NewController("free", out var db);
         using (db)
         {
-            // 7 days inclusive — boundary allowed
-            var result = await controller.CreateTrip(Request(Start, Start.AddDays(6)));
+            // 12 days inclusive — boundary allowed
+            var result = await controller.CreateTrip(Request(Start, Start.AddDays(11)));
 
             result.Should().BeOfType<OkObjectResult>();
             db.Trips.Should().HaveCount(1);

@@ -4,8 +4,8 @@ using FluentAssertions;
 namespace CampCost.Tests.Services;
 
 /// <summary>
-/// Pure plan-rule boundaries. The 7-day free-plan trip limit is INCLUSIVE of both
-/// endpoints: exactly 7 days is allowed, 8 is rejected. Anything that isn't "pro"
+/// Pure plan-rule boundaries. The 12-day free-plan trip limit is INCLUSIVE of both
+/// endpoints: exactly 12 days is allowed, 13 is rejected. Anything that isn't "pro"
 /// (null, unknown values) must be treated as free — fail closed on the cheap side.
 /// </summary>
 public class PlanPolicyTests
@@ -13,18 +13,18 @@ public class PlanPolicyTests
     private static readonly DateOnly Start = new(2026, 7, 1);
 
     [Fact]
-    public void Free_plan_rejects_trip_longer_than_7_days()
+    public void Free_plan_rejects_trip_longer_than_12_days()
     {
-        // Jul 1 → Jul 8 inclusive = 8 days
-        PlanPolicy.IsTripDurationAllowed("free", Start, Start.AddDays(7))
+        // Jul 1 → Jul 13 inclusive = 13 days
+        PlanPolicy.IsTripDurationAllowed("free", Start, Start.AddDays(12))
             .Should().BeFalse();
     }
 
     [Fact]
-    public void Free_plan_allows_exactly_7_day_trip()
+    public void Free_plan_allows_exactly_12_day_trip()
     {
-        // Jul 1 → Jul 7 inclusive = exactly 7 days — boundary must be allowed
-        PlanPolicy.IsTripDurationAllowed("free", Start, Start.AddDays(6))
+        // Jul 1 → Jul 12 inclusive = exactly 12 days — boundary must be allowed
+        PlanPolicy.IsTripDurationAllowed("free", Start, Start.AddDays(11))
             .Should().BeTrue();
     }
 
