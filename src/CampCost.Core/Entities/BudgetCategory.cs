@@ -16,6 +16,11 @@ public class BudgetCategory
     /// </summary>
     public string Category { get; set; } = string.Empty;
     public decimal PlannedAmount { get; set; }
+
+    /// <summary>Optional "why" note explaining the most recent edit to PlannedAmount.
+    /// Latest note only — overwritten each time the category is edited.</summary>
+    public string? Note { get; set; }
+
     public DateTime CreatedAt { get; set; }
 
     public Trip? Trip { get; set; }

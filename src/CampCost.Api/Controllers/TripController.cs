@@ -87,6 +87,43 @@ public class TripController : ControllerBase
         return true;
     }
 
+    // PATCH /api/trips/{tripId}/budget/{category}
+    // Edits one budget category's planned amount. A "why" note is REQUIRED and stored as
+    // the latest note on the row (overwritten each edit). Upserts the category if it
+    // doesn't exist yet, and keeps the trip's total_budget in sync with the category sum.
+    [HttpPatch("{tripId:guid}/budget/{category}")]
+    public async Task<IActionResult> EditBudgetCategory(Guid tripId, string category, [FromBody] BudgetCategoryEditRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.Note))
+            return BadRequest(new { error = "A note explaining the change is required." });
+        if (req.Amount < 0)
+            return BadRequest(new { error = "Amount must be zero or positive." });
+        if (!TryValidateCategories(new Dictionary<string, decimal> { [category] = req.Amount }, out var badCategory))
+            return BadRequest(new { error = $"unknown budget category '{badCategory}'" });
+
+        var trip = await _db.Trips.FirstOrDefaultAsync(t => t.Id == tripId && t.UserId == UserId);
+        if (trip is null) return NotFound();
+
+        var row = await _db.BudgetCategories.FirstOrDefaultAsync(b => b.TripId == tripId && b.Category == category);
+        if (row is null)
+        {
+            row = new BudgetCategory { Id = Guid.NewGuid(), TripId = tripId, Category = category, CreatedAt = DateTime.UtcNow };
+            _db.BudgetCategories.Add(row);
+        }
+        row.PlannedAmount = req.Amount;
+        row.Note = req.Note.Trim();
+
+        // Keep the trip's headline total in sync with the per-category rows (sum of the
+        // others + this new amount) so total_budget never drifts from the breakdown.
+        var othersSum = await _db.BudgetCategories
+            .Where(b => b.TripId == tripId && b.Id != row.Id)
+            .SumAsync(b => b.PlannedAmount);
+        trip.TotalBudget = othersSum + req.Amount;
+
+        await _db.SaveChangesAsync();
+        return Ok(new { category = row.Category, planned_amount = row.PlannedAmount, note = row.Note, total_budget = trip.TotalBudget });
+    }
+
     // GET /api/trips
     // Returns all trips for the current user, ordered by start date
     [HttpGet]

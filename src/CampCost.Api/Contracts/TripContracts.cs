@@ -30,3 +30,10 @@ public record FuelLegRequest(
     [property: JsonPropertyName("miles")] decimal Miles,
     [property: JsonPropertyName("state")] string? State
 );
+
+// Edit one budget category's planned amount. `note` is REQUIRED — a short "why" for the
+// change, stored as the latest note on the category (overwritten each edit).
+public record BudgetCategoryEditRequest(
+    [property: JsonPropertyName("amount")] decimal Amount,
+    [property: JsonPropertyName("note")] string? Note
+);

@@ -166,6 +166,7 @@ public class CampCostDbContext : DbContext
                  v => Enum.Parse<ExpenseCategoryEnum>(v),
                  v => v.ToString());
             e.Property(b => b.PlannedAmount).HasColumnName("planned_amount");
+            e.Property(b => b.Note).HasColumnName("note");
             e.Property(b => b.CreatedAt).HasColumnName("created_at");
         });
 
