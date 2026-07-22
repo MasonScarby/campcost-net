@@ -26,6 +26,12 @@ export default function TripDetail() {
   const { user } = useAuth()
   const [trip, setTrip] = useState(null)
   const [budgets, setBudgets] = useState([])
+  // Inline budget-category edit (amount + required "why" note)
+  const [editCatKey, setEditCatKey] = useState(null)
+  const [editAmt, setEditAmt] = useState('')
+  const [editWhy, setEditWhy] = useState('')
+  const [editBudgetBusy, setEditBudgetBusy] = useState(false)
+  const [editBudgetErr, setEditBudgetErr] = useState('')
   const [expenses, setExpenses] = useState([]) // manual entries only
   const [transactions, setTransactions] = useState([]) // Plaid mirror assigned to this trip
   const [txnBusyId, setTxnBusyId] = useState(null)
@@ -223,6 +229,34 @@ export default function TripDetail() {
       }
     } finally {
       setTxnBusyId(null)
+    }
+  }
+
+  const startBudgetEdit = (b) => {
+    setEditCatKey(b.category)
+    setEditAmt(String(Number(b.planned_amount) || 0))
+    setEditWhy('')
+    setEditBudgetErr('')
+  }
+
+  // Edits one category's planned amount with a REQUIRED "why" note (server-enforced too).
+  const saveBudgetEdit = async (category) => {
+    if (!editWhy.trim()) { setEditBudgetErr('A note explaining the change is required.'); return }
+    setEditBudgetBusy(true)
+    setEditBudgetErr('')
+    try {
+      const res = await backendFetch(`/api/trips/${id}/budget/${category}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ amount: Number(editAmt) || 0, note: editWhy.trim() }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) { setEditBudgetErr(data.error || `Couldn't save (${res.status})`); return }
+      setBudgets(prev => prev.map(b =>
+        b.category === category ? { ...b, planned_amount: data.planned_amount, note: data.note } : b))
+      setTrip(t => (t ? { ...t, total_budget: data.total_budget } : t))
+      setEditCatKey(null)
+    } finally {
+      setEditBudgetBusy(false)
     }
   }
 
@@ -906,17 +940,52 @@ export default function TripDetail() {
             const plan = Number(b.planned_amount) || 0
             const catPct = plan > 0 ? Math.min((spent / plan) * 100, 100) : 0
             const catColor = catPct >= 100 ? '#d4622a' : catPct >= 80 ? '#e07440' : '#2d5a27'
+            const editing = editCatKey === b.category
             return (
               <div key={b.id}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, marginBottom: 6 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 14, marginBottom: 6 }}>
                   <span style={{ color: '#4a3728' }}>{CATEGORY_LABELS[b.category] || b.category}</span>
-                  <span style={{ fontWeight: 600, color: spent > plan ? '#d4622a' : '#8b5e3c' }}>
-                    ${spent.toFixed(0)} / ${plan.toFixed(0)}
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontWeight: 600, color: spent > plan ? '#d4622a' : '#8b5e3c' }}>
+                      ${spent.toFixed(0)} / ${plan.toFixed(0)}
+                    </span>
+                    {!editing && (
+                      <button onClick={() => startBudgetEdit(b)}
+                        style={{ background: 'none', border: 'none', color: '#8b5e3c', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: 0 }}>
+                        Edit
+                      </button>
+                    )}
                   </span>
                 </div>
                 <div style={{ height: 8, background: '#f5e6c8', borderRadius: 99, overflow: 'hidden' }}>
                   <div style={{ height: '100%', width: `${catPct}%`, background: catColor, borderRadius: 99 }} />
                 </div>
+                {b.note && !editing && (
+                  <p style={{ fontSize: 12, color: '#8b5e3c', margin: '4px 0 0', fontStyle: 'italic' }}>why: {b.note}</p>
+                )}
+                {editing && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <input type="number" min="0" step="1" value={editAmt}
+                        onChange={e => setEditAmt(e.target.value)} placeholder="Amount"
+                        style={{ flex: 1, border: '1px solid #e8d5b0', borderRadius: 8, padding: '8px 10px', fontSize: 14, outline: 'none' }} />
+                      <input type="text" value={editWhy} maxLength={200}
+                        onChange={e => setEditWhy(e.target.value)} placeholder="Why? (required)"
+                        style={{ flex: 2, border: '1px solid #e8d5b0', borderRadius: 8, padding: '8px 10px', fontSize: 14, outline: 'none' }} />
+                    </div>
+                    {editBudgetErr && <p style={{ fontSize: 12, color: '#b5493a', margin: 0 }}>{editBudgetErr}</p>}
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button disabled={editBudgetBusy || !editWhy.trim()} onClick={() => saveBudgetEdit(b.category)}
+                        style={{ background: '#8b5e3c', color: '#fff', border: 'none', borderRadius: 8, padding: '6px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: editBudgetBusy || !editWhy.trim() ? 0.5 : 1 }}>
+                        {editBudgetBusy ? 'Saving…' : 'Save'}
+                      </button>
+                      <button onClick={() => setEditCatKey(null)}
+                        style={{ background: 'none', color: '#8b5e3c', border: 'none', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )
           })}
