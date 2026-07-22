@@ -12,6 +12,7 @@ import ConnectBank from './pages/ConnectBank'
 import Account from './pages/Account'
 import PrivacyPolicy from './pages/PrivacyPolicy'
 import Terms from './pages/Terms'
+import ResetPassword from './pages/ResetPassword'
 
 export default function App() {
   return (
@@ -23,6 +24,7 @@ export default function App() {
             <Routes>
               <Route path="/" element={<Navigate to="/login" replace />} />
               <Route path="/login" element={<Login />} />
+              <Route path="/reset-password" element={<ResetPassword />} />
               {/* Public: legal pages must be reachable logged-out (Plaid prod + app review require it) */}
               <Route path="/privacy" element={<PrivacyPolicy />} />
               <Route path="/terms" element={<Terms />} />
