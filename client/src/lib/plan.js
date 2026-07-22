@@ -6,7 +6,7 @@
 import { backendFetch } from './api'
 
 export const FREE_TRIP_LIMIT = 3
-export const FREE_MAX_TRIP_DAYS = 7
+export const FREE_MAX_TRIP_DAYS = 12
 export const FREE_TXN_LIMIT = 50 // mirrors FreePlanLimits.MaxAssignedTransactionsPerTrip
 
 const CACHE_KEY = 'campcost_plan'

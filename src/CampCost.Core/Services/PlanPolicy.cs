@@ -12,7 +12,7 @@ public static class PlanPolicy
     public const string ProPlan = "pro";
 
     public const string TripDurationUpgradeMessage =
-        "Free plan trips are limited to 7 days. Upgrade to Pro for unlimited trip length.";
+        "Free plan trips are limited to 12 days. Upgrade to Pro for unlimited trip length.";
 
     public const string TripCountUpgradeMessage =
         "Free plan is limited to 3 trips. Upgrade to Pro for unlimited trips.";
@@ -31,7 +31,7 @@ public static class PlanPolicy
 
     /// <summary>
     /// Free plan: reject trips longer than <see cref="FreePlanLimits.MaxTripDays"/> days
-    /// (exactly 7 is allowed, 8 is rejected). Pro: always allowed. Missing dates: allowed
+    /// (exactly 12 is allowed, 13 is rejected). Pro: always allowed. Missing dates: allowed
     /// (nothing to measure).
     /// </summary>
     public static bool IsTripDurationAllowed(string? plan, DateOnly? start, DateOnly? end)

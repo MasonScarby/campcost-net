@@ -1,6 +1,23 @@
 import { useState } from 'react'
 import { backendFetch } from '../lib/api'
 
+// US states + DC, alphabetical by name; value is the 2-letter code the API expects.
+const US_STATES = [
+  ['AL', 'Alabama'], ['AK', 'Alaska'], ['AZ', 'Arizona'], ['AR', 'Arkansas'],
+  ['CA', 'California'], ['CO', 'Colorado'], ['CT', 'Connecticut'], ['DE', 'Delaware'],
+  ['DC', 'District of Columbia'], ['FL', 'Florida'], ['GA', 'Georgia'], ['HI', 'Hawaii'],
+  ['ID', 'Idaho'], ['IL', 'Illinois'], ['IN', 'Indiana'], ['IA', 'Iowa'],
+  ['KS', 'Kansas'], ['KY', 'Kentucky'], ['LA', 'Louisiana'], ['ME', 'Maine'],
+  ['MD', 'Maryland'], ['MA', 'Massachusetts'], ['MI', 'Michigan'], ['MN', 'Minnesota'],
+  ['MS', 'Mississippi'], ['MO', 'Missouri'], ['MT', 'Montana'], ['NE', 'Nebraska'],
+  ['NV', 'Nevada'], ['NH', 'New Hampshire'], ['NJ', 'New Jersey'], ['NM', 'New Mexico'],
+  ['NY', 'New York'], ['NC', 'North Carolina'], ['ND', 'North Dakota'], ['OH', 'Ohio'],
+  ['OK', 'Oklahoma'], ['OR', 'Oregon'], ['PA', 'Pennsylvania'], ['RI', 'Rhode Island'],
+  ['SC', 'South Carolina'], ['SD', 'South Dakota'], ['TN', 'Tennessee'], ['TX', 'Texas'],
+  ['UT', 'Utah'], ['VT', 'Vermont'], ['VA', 'Virginia'], ['WA', 'Washington'],
+  ['WV', 'West Virginia'], ['WI', 'Wisconsin'], ['WY', 'Wyoming'],
+]
+
 // Pre-trip fuel cost estimator. Calls POST /api/trips/{id}/fuel-estimate; the
 // server owns the math and the seeded state price table. Legs are optional —
 // left empty, the server uses the trip's total_miles at the national average.
@@ -86,11 +103,15 @@ export default function FuelEstimator({ tripId, totalMiles, onApplied }) {
                 value={leg.miles} onChange={e => setLeg(i, { miles: e.target.value })}
                 style={{ ...input, flex: 2 }}
               />
-              <input
-                type="text" maxLength={2} placeholder="State (opt.)"
-                value={leg.state} onChange={e => setLeg(i, { state: e.target.value.toUpperCase() })}
+              <select
+                value={leg.state} onChange={e => setLeg(i, { state: e.target.value })}
                 style={{ ...input, flex: 1 }}
-              />
+              >
+                <option value="">State (opt.)</option>
+                {US_STATES.map(([code, name]) => (
+                  <option key={code} value={code}>{name}</option>
+                ))}
+              </select>
               {legs.length > 1 && (
                 <button onClick={() => setLegs(ls => ls.filter((_, j) => j !== i))} style={{ ...btn, background: 'none' }}>✕</button>
               )}
