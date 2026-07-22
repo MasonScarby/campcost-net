@@ -8,12 +8,23 @@ export default function Login() {
   const [password, setPassword] = useState('')
   const [isSignUp, setIsSignUp] = useState(false)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const [loading, setLoading] = useState(false)
   // 2FA challenge step — shown when the account has a verified TOTP factor
   const [mfaFactorId, setMfaFactorId] = useState(null)
   const [mfaCode, setMfaCode] = useState('')
-  const { signIn, signUp, signInWithGoogle } = useAuth()
+  const { signIn, signUp, signInWithGoogle, resetPassword } = useAuth()
   const navigate = useNavigate()
+
+  const handleForgot = async () => {
+    setError(''); setNotice('')
+    if (!email) { setError('Enter your email above first, then tap “Forgot password?”'); return }
+    setLoading(true)
+    const { error } = await resetPassword(email)
+    setLoading(false)
+    // Don't reveal whether the email exists — always show the same confirmation.
+    setNotice(`If an account exists for ${email}, a password reset link is on its way. Check your inbox (and spam).`)
+  }
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -156,7 +167,19 @@ export default function Login() {
               className="w-full border border-[#e8d5b0] rounded-xl text-sm outline-none focus:border-[#2d5a27] transition-colors"
               style={{ padding: '12px 16px' }}
             />
+            {!isSignUp && (
+              <button
+                type="button"
+                onClick={handleForgot}
+                disabled={loading}
+                className="text-[#2d5a27] text-xs font-medium hover:underline self-end disabled:opacity-50"
+                style={{ marginTop: '-4px' }}
+              >
+                Forgot password?
+              </button>
+            )}
             {error && <p className="text-[#d4622a] text-xs">{error}</p>}
+            {notice && <p className="text-[#2d5a27] text-xs">{notice}</p>}
             <button
               type="submit"
               disabled={loading}
@@ -170,7 +193,7 @@ export default function Login() {
           <p className="text-center text-xs text-[#8b5e3c] mt-4">
             {isSignUp ? 'Already have an account?' : "Don't have an account?"}{' '}
             <button
-              onClick={() => { setIsSignUp(!isSignUp); setError('') }}
+              onClick={() => { setIsSignUp(!isSignUp); setError(''); setNotice('') }}
               className="text-[#2d5a27] font-medium hover:underline"
             >
               {isSignUp ? 'Sign in' : 'Sign up'}
