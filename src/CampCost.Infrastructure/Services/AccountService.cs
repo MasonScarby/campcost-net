@@ -55,6 +55,32 @@ public class AccountService : IAccountService
         return true;
     }
 
+    public async Task<int> ClearTransactionsAsync(Guid userId)
+    {
+        // Hard-delete every transaction for this user, INCLUDING soft-deleted rows
+        // (IgnoreQueryFilters) — otherwise dedup on plaid_transaction_id would block a clean
+        // re-import. Bank connections and manual `expenses` are left untouched.
+        var txns = await _db.Transactions
+            .IgnoreQueryFilters()
+            .Where(t => t.UserId == userId)
+            .ToListAsync();
+        _db.Transactions.RemoveRange(txns);
+
+        // Reset cursors so the next sync re-pulls the full available history as a fresh set.
+        var connections = await _db.PlaidConnections
+            .Where(c => c.UserId == userId)
+            .ToListAsync();
+        foreach (var c in connections)
+            c.SyncCursor = null;
+
+        await _db.SaveChangesAsync();
+
+        _logger.LogInformation(
+            "Cleared {Count} transaction(s) and reset {Conns} cursor(s) for user {UserId}",
+            txns.Count, connections.Count, userId);
+        return txns.Count;
+    }
+
     public async Task DeleteAccountAsync(Guid userId)
     {
         // 1) Invalidate every Plaid Item first (best-effort).

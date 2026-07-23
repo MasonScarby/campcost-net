@@ -15,6 +15,15 @@ public interface IAccountService
     Task<bool> DisconnectBankAsync(Guid userId, string itemId);
 
     /// <summary>
+    /// Hard-deletes ALL of the user's synced bank <c>transactions</c> (the Plaid mirror,
+    /// including soft-deleted rows) and resets every connection's sync cursor, so the next
+    /// sync re-imports a clean set. Bank connections stay linked and manual <c>expenses</c>
+    /// are left intact. User-initiated escape hatch for duplicate/stale imported data (e.g.
+    /// after a disconnect/reconnect creates duplicates). Returns the number removed.
+    /// </summary>
+    Task<int> ClearTransactionsAsync(Guid userId);
+
+    /// <summary>
     /// Permanently deletes the user's account and ALL their data: removes every Plaid Item,
     /// then deletes transactions, expenses, budget categories, trip stops, trips, connections,
     /// and subscription rows, and finally the Supabase auth user. Irreversible.

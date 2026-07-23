@@ -136,4 +136,50 @@ public class AccountServiceTests
         (await Service().DisconnectBankAsync(userA, itemB)).Should().BeFalse();
         _db.PlaidConnections.Any(c => c.UserId == userB).Should().BeTrue();
     }
+
+    [Fact]
+    public async Task ClearTransactions_deletes_all_txns_incl_soft_deleted_resets_cursor_keeps_rest()
+    {
+        var userA = Guid.NewGuid();
+        SeedUser(userA, "a");
+        var conn = _db.PlaidConnections.Single(c => c.UserId == userA);
+        conn.SyncCursor = "cursor-abc";
+        // A soft-deleted transaction must also be purged, else dedup would block a clean re-import.
+        _db.Transactions.Add(new Transaction
+        {
+            Id = Guid.NewGuid(), UserId = userA, PlaidConnectionId = conn.Id,
+            PlaidTransactionId = "ptx-removed", Amount = 3m,
+            TransactionDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            DeletedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow
+        });
+        _db.SaveChanges();
+
+        var cleared = await Service().ClearTransactionsAsync(userA);
+
+        cleared.Should().Be(2, "the live seeded txn + the soft-deleted one");
+        _db.Transactions.IgnoreQueryFilters().Any(t => t.UserId == userA).Should().BeFalse();
+        // Cursor reset so the next sync re-pulls a clean set.
+        _db.PlaidConnections.Single(c => c.UserId == userA).SyncCursor.Should().BeNull();
+        // Bank connection + manual expense are KEPT (not a full account delete).
+        _db.PlaidConnections.Any(c => c.UserId == userA).Should().BeTrue();
+        _db.Expenses.IgnoreQueryFilters().Any(e => e.UserId == userA).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ClearTransactions_only_touches_the_given_user()
+    {
+        var userA = Guid.NewGuid();
+        var userB = Guid.NewGuid();
+        SeedUser(userA, "a");
+        SeedUser(userB, "b");
+        _db.PlaidConnections.Single(c => c.UserId == userB).SyncCursor = "b-cursor";
+        _db.SaveChanges();
+
+        await Service().ClearTransactionsAsync(userA);
+
+        _db.Transactions.IgnoreQueryFilters().Any(t => t.UserId == userB)
+            .Should().BeTrue("another user's transactions are untouched");
+        _db.PlaidConnections.Single(c => c.UserId == userB).SyncCursor
+            .Should().Be("b-cursor", "another user's cursor is untouched");
+    }
 }

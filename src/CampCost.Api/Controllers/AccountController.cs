@@ -64,4 +64,16 @@ public class AccountController : ControllerBase
         await _account.DeleteAccountAsync(UserId);
         return Ok(new { success = true, deleted = true });
     }
+
+    // POST /api/account/clear-transactions
+    // Hard-deletes all of the user's synced bank transactions and resets sync cursors so the
+    // next sync re-imports a clean set. Bank connections stay linked; manual expenses are kept.
+    // User-initiated escape hatch for duplicate/stale data (e.g. after a disconnect/reconnect).
+    // Keyed off the JWT — a user can only clear their own transactions.
+    [HttpPost("clear-transactions")]
+    public async Task<IActionResult> ClearTransactions()
+    {
+        var cleared = await _account.ClearTransactionsAsync(UserId);
+        return Ok(new { success = true, cleared });
+    }
 }

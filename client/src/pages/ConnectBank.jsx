@@ -38,6 +38,10 @@ export default function ConnectBank() {
   // How many days of history to pull on first connect. Must stay in sync with the server
   // whitelist (PlaidController.AllowedImportDays); the API re-validates and ignores anything else.
   const [importDays, setImportDays] = useState(30)
+  // Clear-all-transactions escape hatch (dupes/stale data). Re-syncable, so a simple confirm —
+  // no type-to-confirm (that's reserved for irreversible actions like account/trip deletion).
+  const [clearState, setClearState] = useState('idle') // idle | confirm | working | done | error
+  const [clearResult, setClearResult] = useState(null)
   // 2FA gate: connecting a bank requires a verified TOTP factor + aal2 session.
   // The server enforces this too (403 on token exchange) — this is just the UX.
   const [mfaReady, setMfaReady] = useState(null) // null = checking | false | true
@@ -86,6 +90,24 @@ export default function ConnectBank() {
       setSyncStatus('error')
       setSyncResult(err.message === 'Failed to fetch' ? 'Backend is not running.' : err.message)
       setTimeout(() => setSyncStatus('idle'), 6000)
+    }
+  }
+
+  const clearTransactions = async () => {
+    setClearState('working')
+    setClearResult(null)
+    try {
+      const res = await backendFetch('/api/account/clear-transactions', { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || `Server error ${res.status}`)
+      setClearResult(data.cleared)
+      setClearState('done')
+      fetchConnections()
+      setTimeout(() => setClearState('idle'), 5000)
+    } catch (err) {
+      setClearState('error')
+      setClearResult(err.message === 'Failed to fetch' ? 'Backend is not running.' : err.message)
+      setTimeout(() => setClearState('idle'), 6000)
     }
   }
 
@@ -356,6 +378,54 @@ export default function ConnectBank() {
                 ⚠ {syncWarning}
               </p>
             )}
+
+            {/* Dupe heads-up + clear-all escape hatch */}
+            <div style={{ marginTop: 14 }}>
+              <p style={{ fontSize: 11, color: '#8b5e3c', margin: '0 0 8px' }}>
+                Heads up: disconnecting and reconnecting a bank can create duplicate transactions
+                (your bank re-sends its history). If that happens, clear and re-sync.
+              </p>
+              {clearState === 'confirm' ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 12, color: '#4a3728' }}>
+                    Remove all imported transactions? They can be re-synced from your bank.
+                  </span>
+                  <button
+                    onClick={clearTransactions}
+                    style={{ fontSize: 12, fontWeight: 600, color: 'white', background: '#b91c1c', border: 'none', borderRadius: 8, padding: '6px 12px', cursor: 'pointer' }}
+                  >
+                    Clear all
+                  </button>
+                  <button
+                    onClick={() => setClearState('idle')}
+                    style={{ fontSize: 12, color: '#8b5e3c', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setClearState('confirm')}
+                  disabled={clearState === 'working'}
+                  style={{
+                    fontSize: 12, fontWeight: 600, color: '#b91c1c', background: 'none',
+                    border: '1px solid #e8bcbc', borderRadius: 8, padding: '6px 12px',
+                    cursor: clearState === 'working' ? 'not-allowed' : 'pointer',
+                    opacity: clearState === 'working' ? 0.6 : 1,
+                  }}
+                >
+                  {clearState === 'working' ? 'Clearing...' : 'Clear all transactions'}
+                </button>
+              )}
+              {clearState === 'done' && (
+                <p style={{ fontSize: 12, color: '#2d5a27', margin: '8px 0 0' }}>
+                  ✓ Cleared {clearResult} transaction{clearResult !== 1 ? 's' : ''}. Hit “Sync now” to re-import a clean set.
+                </p>
+              )}
+              {clearState === 'error' && (
+                <p style={{ fontSize: 12, color: '#d4622a', margin: '8px 0 0' }}>{clearResult}</p>
+              )}
+            </div>
 
             <div style={{ height: 1, background: '#e8d5b0', margin: '20px 0' }} />
           </div>
