@@ -269,8 +269,8 @@ export default function ConnectBank() {
                           </button>
                         )}
                         {confirmDisconnect === primary.id ? (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <span style={{ fontSize: 11, color: '#4a3728' }}>Remove?</span>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: 240 }}>
+                            <span style={{ fontSize: 11, color: '#8a5a00' }}>Reconnecting the same bank can cause duplicates. Remove?</span>
                             <button
                               onClick={() => disconnectConnection(primary.id)}
                               disabled={disconnecting}
@@ -314,8 +314,8 @@ export default function ConnectBank() {
                           </div>
                         </div>
                         {confirmDisconnect === c.id ? (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <span style={{ fontSize: 11, color: '#4a3728' }}>Remove?</span>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: 240 }}>
+                            <span style={{ fontSize: 11, color: '#8a5a00' }}>Reconnecting the same bank can cause duplicates. Remove?</span>
                             <button
                               onClick={() => disconnectConnection(c.id)}
                               disabled={disconnecting}
