@@ -35,6 +35,9 @@ export default function ConnectBank() {
   const [confirmDisconnect, setConfirmDisconnect] = useState(null) // connection id
   const [disconnecting, setDisconnecting] = useState(false)
   const [syncWarning, setSyncWarning] = useState(null)
+  // How many days of history to pull on first connect. Must stay in sync with the server
+  // whitelist (PlaidController.AllowedImportDays); the API re-validates and ignores anything else.
+  const [importDays, setImportDays] = useState(30)
   // 2FA gate: connecting a bank requires a verified TOTP factor + aal2 session.
   // The server enforces this too (403 on token exchange) — this is just the UX.
   const [mfaReady, setMfaReady] = useState(null) // null = checking | false | true
@@ -91,7 +94,10 @@ export default function ConnectBank() {
     setStatus('opening')
     setErrorMsg('')
     try {
-      const res = await backendFetch('/api/plaid/link-token', { method: 'POST' })
+      const res = await backendFetch('/api/plaid/link-token', {
+        method: 'POST',
+        body: JSON.stringify({ days: importDays }),
+      })
       const data = await res.json()
       if (data.error) throw new Error(data.error)
       setLinkToken(data.link_token)
@@ -375,6 +381,34 @@ export default function ConnectBank() {
                 {errorMsg}
               </p>
             )}
+            {/* Import-history window — bounds the initial backfill so we only pull the
+                history the user wants (less noise, less bank data at rest). */}
+            <div style={{ marginBottom: 16 }}>
+              <p style={{ fontSize: 13, fontWeight: 600, color: '#4a3728', margin: '0 0 8px' }}>
+                Import transactions from the last…
+              </p>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {[14, 30, 60, 90].map(d => (
+                  <button
+                    key={d}
+                    type="button"
+                    onClick={() => setImportDays(d)}
+                    style={{
+                      flex: 1, padding: '8px 0', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                      borderRadius: 10,
+                      border: importDays === d ? '1px solid #2d5a27' : '1px solid #e8d5b0',
+                      background: importDays === d ? '#2d5a27' : 'white',
+                      color: importDays === d ? 'white' : '#8b5e3c',
+                    }}
+                  >
+                    {d} days
+                  </button>
+                ))}
+              </div>
+              <p style={{ fontSize: 11, color: '#8b5e3c', margin: '8px 0 0' }}>
+                Only this much history is pulled from your bank. You can sync more later.
+              </p>
+            </div>
             <button
               onClick={getLinkToken}
               disabled={status === 'opening' || status === 'exchanging'}

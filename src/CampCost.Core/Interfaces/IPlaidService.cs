@@ -2,7 +2,13 @@ namespace CampCost.Core.Interfaces;
 
 public interface IPlaidService
 {
-    Task<string> CreateLinkTokenAsync(string userId);
+    /// <summary>
+    /// Creates a Plaid Link token. <paramref name="transactionDays"/> sets Plaid's
+    /// transactions.days_requested — the maximum days of history Plaid fetches for this
+    /// item on first sync. Callers MUST pass a validated value (the controller whitelists
+    /// it); Plaid never sees an unbounded/injected number.
+    /// </summary>
+    Task<string> CreateLinkTokenAsync(string userId, int transactionDays);
     Task<(string AccessToken, string ItemId)> ExchangePublicTokenAsync(string publicToken);
 
     /// <summary>

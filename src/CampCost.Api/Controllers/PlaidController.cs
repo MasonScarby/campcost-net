@@ -45,12 +45,20 @@ public class PlaidController : ControllerBase
         ?? User.FindFirstValue("sub")
         ?? throw new UnauthorizedAccessException("No user ID in token"));
 
+    // Import-history windows the user may pick (days). Whitelist — the ONLY values ever
+    // forwarded to Plaid's days_requested. Anything else falls back to the default.
+    private static readonly int[] AllowedImportDays = { 14, 30, 60, 90 };
+    private const int DefaultImportDays = 30;
+
     // POST /api/plaid/link-token
-    // Creates a Plaid Link token so the frontend can open the bank-connection UI
+    // Creates a Plaid Link token so the frontend can open the bank-connection UI.
+    // Optional body { "days": 14|30|60|90 } bounds the initial transaction backfill;
+    // the value is whitelisted server-side so a tampered request can't widen the fetch.
     [HttpPost("link-token")]
-    public async Task<IActionResult> CreateLinkToken()
+    public async Task<IActionResult> CreateLinkToken([FromBody] LinkTokenRequest? req = null)
     {
-        var token = await _plaid.CreateLinkTokenAsync(UserId.ToString());
+        var days = req?.Days is int d && AllowedImportDays.Contains(d) ? d : DefaultImportDays;
+        var token = await _plaid.CreateLinkTokenAsync(UserId.ToString(), days);
         return Ok(new { link_token = token });
     }
 
