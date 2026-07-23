@@ -28,7 +28,7 @@ public class PlaidService : IPlaidService
         _redirectUri = config["Plaid:RedirectUri"] ?? "";
     }
 
-    public async Task<string> CreateLinkTokenAsync(string userId)
+    public async Task<string> CreateLinkTokenAsync(string userId, int transactionDays)
     {
         var response = await _client.LinkTokenCreateAsync(new LinkTokenCreateRequest
         {
@@ -37,7 +37,10 @@ public class PlaidService : IPlaidService
             Products = new List<Products> { Products.Transactions },
             CountryCodes = new List<CountryCode> { CountryCode.Us },
             Language = Language.English,
-            Webhook = string.IsNullOrEmpty(_webhookUrl) ? null : _webhookUrl
+            Webhook = string.IsNullOrEmpty(_webhookUrl) ? null : _webhookUrl,
+            // Limits the initial backfill so we only fetch (and store) the history the user
+            // asked for — less bank PII at rest, less noise. Whitelisted upstream in the controller.
+            Transactions = new LinkTokenTransactions { DaysRequested = transactionDays }
         });
         return response.LinkToken;
     }
