@@ -9,6 +9,17 @@ public interface IPlaidService
     /// it); Plaid never sees an unbounded/injected number.
     /// </summary>
     Task<string> CreateLinkTokenAsync(string userId, int transactionDays);
+
+    /// <summary>
+    /// Creates a Link token in UPDATE mode for an existing Item, identified by its
+    /// <paramref name="accessToken"/>. Update mode re-authenticates the SAME Item — item_id and
+    /// transaction_ids stay stable — so a user fixing a broken connection never mints a new Item
+    /// and never gets the duplicate history a disconnect+reconnect causes. No products/history
+    /// window are specified (they belong to the original create). Used for ITEM_LOGIN_REQUIRED /
+    /// PENDING_EXPIRATION re-auth.
+    /// </summary>
+    Task<string> CreateUpdateLinkTokenAsync(string userId, string accessToken);
+
     Task<(string AccessToken, string ItemId)> ExchangePublicTokenAsync(string publicToken);
 
     /// <summary>

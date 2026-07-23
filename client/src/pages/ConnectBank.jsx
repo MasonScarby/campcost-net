@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { usePlaidLink } from 'react-plaid-link'
 import { useAuth } from '../context/AuthContext'
@@ -35,6 +35,12 @@ export default function ConnectBank() {
   const [confirmDisconnect, setConfirmDisconnect] = useState(null) // connection id
   const [disconnecting, setDisconnecting] = useState(false)
   const [disconnectError, setDisconnectError] = useState(null)
+  // Update-mode re-auth: reuse the single Plaid Link instance but skip the token exchange on
+  // success (the Item's access_token is unchanged). A ref, not state, so onSuccess reads the
+  // current mode without being re-created.
+  const linkModeRef = useRef('connect') // 'connect' | 'update'
+  const [reauthBusy, setReauthBusy] = useState(null)   // connection id being re-authed
+  const [reauthError, setReauthError] = useState(null)
   const [syncWarning, setSyncWarning] = useState(null)
   // How many days of history to pull on first connect. Must stay in sync with the server
   // whitelist (PlaidController.AllowedImportDays); the API re-validates and ignores anything else.
@@ -54,7 +60,7 @@ export default function ConnectBank() {
   const fetchConnections = () => {
     supabase
       .from('plaid_connections')
-      .select('id, institution_name, last_sync_at')
+      .select('id, institution_name, last_sync_at, needs_reauth')
       .eq('user_id', user.id)
       .then(({ data }) => {
         setConnections(data ?? [])
@@ -147,7 +153,41 @@ export default function ConnectBank() {
     }
   }
 
+  // Opens Link in UPDATE mode to re-authenticate an existing Item (fixes a needs_reauth
+  // connection). Same Item → stable transaction_ids → no duplicate history.
+  const startReauth = async (connectionId) => {
+    setReauthBusy(connectionId)
+    setReauthError(null)
+    try {
+      const res = await backendFetch('/api/plaid/update-link-token', {
+        method: 'POST',
+        body: JSON.stringify({ id: connectionId }),
+      })
+      const data = await res.json()
+      if (!res.ok || data.error) throw new Error(data.error || `Server error ${res.status}`)
+      linkModeRef.current = 'update'
+      setLinkToken(data.link_token) // the effect below opens Link once it's ready
+    } catch (err) {
+      setReauthError(err.message === 'Failed to fetch' ? 'Backend is not running.' : err.message)
+      setReauthBusy(null)
+    }
+  }
+
   const onSuccess = useCallback(async (public_token, metadata) => {
+    // Update mode: the existing Item was re-authenticated in place — the access_token is
+    // unchanged, so there is NO public token to exchange. Just re-sync; a successful sync
+    // clears needs_reauth server-side.
+    if (linkModeRef.current === 'update') {
+      linkModeRef.current = 'connect'
+      setLinkToken(null)
+      setReauthBusy(null)
+      try {
+        await backendFetch('/api/plaid/sync', { method: 'POST' })
+      } catch { /* the flag clears on the next successful sync regardless */ }
+      fetchConnections()
+      return
+    }
+
     setStatus('exchanging')
     try {
       const res = await backendFetch('/api/plaid/exchange-token', {
@@ -169,12 +209,36 @@ export default function ConnectBank() {
   const { open, ready } = usePlaidLink({
     token: linkToken,
     onSuccess,
-    onExit: () => { setLinkToken(null); setStatus('idle') },
+    onExit: () => {
+      setLinkToken(null)
+      setReauthBusy(null)
+      // A cancelled update-mode session must reset the mode, or the next new-connect would
+      // wrongly skip the token exchange.
+      linkModeRef.current = 'connect'
+      if (status !== 'connected') setStatus('idle')
+    },
   })
 
   useEffect(() => {
     if (linkToken && ready) open()
   }, [linkToken, ready, open])
+
+  // Amber "Action needed" badge + Reconnect (update-mode) button for a connection Plaid flagged
+  // as needing re-auth. Shared by the primary and the older ("+N more") connection rows.
+  const renderReauth = (conn) => (
+    <>
+      <span style={{ fontSize: 11, background: '#fef3c7', color: '#b45309', padding: '3px 10px', borderRadius: 99, fontWeight: 600 }}>
+        Action needed
+      </span>
+      <button
+        onClick={() => startReauth(conn.id)}
+        disabled={reauthBusy === conn.id}
+        style={{ fontSize: 11, fontWeight: 600, color: 'white', background: '#2563eb', border: 'none', borderRadius: 6, padding: '3px 8px', cursor: 'pointer' }}
+      >
+        {reauthBusy === conn.id ? '...' : 'Reconnect'}
+      </button>
+    </>
+  )
 
   const grouped = groupByInstitution(connections)
   const institutions = Object.keys(grouped)
@@ -257,6 +321,9 @@ export default function ConnectBank() {
         {!loadingConns && hasConnections && (
           <div style={{ marginBottom: 24 }}>
             <p style={{ fontSize: 13, fontWeight: 600, color: '#8b5e3c', marginBottom: 10 }}>Connected accounts</p>
+            {reauthError && (
+              <p style={{ fontSize: 12, color: '#b91c1c', marginBottom: 10 }}>{reauthError}</p>
+            )}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {institutions.map(name => {
                 const group = grouped[name]
@@ -306,6 +373,16 @@ export default function ConnectBank() {
                               Cancel
                             </button>
                           </div>
+                        ) : primary.needs_reauth ? (
+                          <>
+                            {renderReauth(primary)}
+                            <button
+                              onClick={() => setConfirmDisconnect(primary.id)}
+                              style={{ fontSize: 11, color: '#8b5e3c', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                            >
+                              Disconnect
+                            </button>
+                          </>
                         ) : (
                           <>
                             <span style={{ fontSize: 11, background: '#dcfce7', color: '#15803d', padding: '3px 10px', borderRadius: 99, fontWeight: 600 }}>
@@ -352,6 +429,16 @@ export default function ConnectBank() {
                               style={{ fontSize: 11, color: '#8b5e3c', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
                             >
                               Cancel
+                            </button>
+                          </div>
+                        ) : c.needs_reauth ? (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            {renderReauth(c)}
+                            <button
+                              onClick={() => setConfirmDisconnect(c.id)}
+                              style={{ fontSize: 11, color: '#8b5e3c', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                            >
+                              Disconnect
                             </button>
                           </div>
                         ) : (

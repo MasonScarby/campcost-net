@@ -157,4 +157,71 @@ public class PlaidControllerWebhookTests
         result.Should().BeOfType<OkObjectResult>();
         _sync.VerifyNoOtherCalls();
     }
+
+    // ── ITEM webhooks: connection-health / re-auth flag ────────────────────────
+
+    private bool NeedsReauth(string itemId) =>
+        _db.PlaidConnections.Single(c => c.ItemId == itemId).NeedsReauth;
+
+    [Fact]
+    public async Task Item_login_required_webhook_flags_connection_for_reauth_without_sync()
+    {
+        SeedConnection("item-1");
+        _verifier.Setup(v => v.VerifyAsync(It.IsAny<string>(), It.IsAny<string>()))
+                 .ReturnsAsync(true);
+        SetRequest(
+            """{"webhook_type":"ITEM","webhook_code":"ERROR","item_id":"item-1","error":{"error_code":"ITEM_LOGIN_REQUIRED"}}""",
+            "valid.jwt.value");
+
+        var result = await _controller.Webhook();
+
+        result.Should().BeOfType<OkObjectResult>();
+        NeedsReauth("item-1").Should().BeTrue();
+        _sync.VerifyNoOtherCalls(); // an ITEM webhook must not trigger a sync
+    }
+
+    [Fact]
+    public async Task Pending_expiration_webhook_flags_connection_for_reauth()
+    {
+        SeedConnection("item-1");
+        _verifier.Setup(v => v.VerifyAsync(It.IsAny<string>(), It.IsAny<string>()))
+                 .ReturnsAsync(true);
+        SetRequest("""{"webhook_type":"ITEM","webhook_code":"PENDING_EXPIRATION","item_id":"item-1"}""",
+            "valid.jwt.value");
+
+        await _controller.Webhook();
+
+        NeedsReauth("item-1").Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Login_repaired_webhook_clears_a_flagged_connection()
+    {
+        SeedConnection("item-1");
+        _db.PlaidConnections.Single(c => c.ItemId == "item-1").NeedsReauth = true;
+        _db.SaveChanges();
+        _verifier.Setup(v => v.VerifyAsync(It.IsAny<string>(), It.IsAny<string>()))
+                 .ReturnsAsync(true);
+        SetRequest("""{"webhook_type":"ITEM","webhook_code":"LOGIN_REPAIRED","item_id":"item-1"}""",
+            "valid.jwt.value");
+
+        await _controller.Webhook();
+
+        NeedsReauth("item-1").Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Item_error_with_unrelated_code_does_not_flag_reauth()
+    {
+        SeedConnection("item-1");
+        _verifier.Setup(v => v.VerifyAsync(It.IsAny<string>(), It.IsAny<string>()))
+                 .ReturnsAsync(true);
+        SetRequest(
+            """{"webhook_type":"ITEM","webhook_code":"ERROR","item_id":"item-1","error":{"error_code":"INSTITUTION_DOWN"}}""",
+            "valid.jwt.value");
+
+        await _controller.Webhook();
+
+        NeedsReauth("item-1").Should().BeFalse();
+    }
 }

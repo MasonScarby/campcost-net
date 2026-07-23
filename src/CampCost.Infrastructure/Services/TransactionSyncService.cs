@@ -276,6 +276,9 @@ public class TransactionSyncService : ITransactionSyncService
             // never advance it past deltas that were not stored.
             connection.SyncCursor = delta.NextCursor;
             connection.LastSyncAt = DateTime.UtcNow;
+            // A sync that reached here authenticated fine — self-heal any stale re-auth flag
+            // (covers both a completed update-mode re-auth and Plaid's own LOGIN_REPAIRED).
+            connection.NeedsReauth = false;
 
             _logger.LogInformation(
                 "Plaid sync end: connection {ConnectionId} — added {Added}, modified {Modified}, removed {Removed}",

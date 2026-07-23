@@ -62,6 +62,26 @@ public class PlaidController : ControllerBase
         return Ok(new { link_token = token });
     }
 
+    // POST /api/plaid/update-link-token  { "id": "<connection row id>" }
+    // Returns a Link token in UPDATE mode for that connection, so the user can re-authenticate
+    // the SAME Item (fixes ITEM_LOGIN_REQUIRED / PENDING_EXPIRATION) without minting a new Item —
+    // which is what avoids the duplicate history a disconnect+reconnect causes. Scoped by
+    // connection id + JWT user, so a user can only re-auth their own bank.
+    [HttpPost("update-link-token")]
+    public async Task<IActionResult> CreateUpdateLinkToken([FromBody] UpdateLinkTokenRequest req)
+    {
+        if (req.Id == Guid.Empty)
+            return BadRequest(new { error = "id is required" });
+
+        var connection = await _db.PlaidConnections
+            .FirstOrDefaultAsync(c => c.Id == req.Id && c.UserId == UserId);
+        if (connection is null)
+            return NotFound(new { error = "No connected bank found with that id." });
+
+        var token = await _plaid.CreateUpdateLinkTokenAsync(UserId.ToString(), connection.AccessToken);
+        return Ok(new { link_token = token });
+    }
+
     // POST /api/plaid/exchange-token
     // Swaps the short-lived public token for a permanent access token.
     // Upserts on item_id — re-linking the same bank updates the access token.
@@ -203,14 +223,15 @@ public class PlaidController : ControllerBase
             // Signed-but-unparseable should never happen; acknowledge so Plaid doesn't retry forever.
         }
 
-        if (payload?.WebhookType != "TRANSACTIONS")
+        // Only TRANSACTIONS (new/changed spend) and ITEM (connection health) webhooks are actionable.
+        if (payload?.WebhookType is not ("TRANSACTIONS" or "ITEM"))
             return Ok(new { received = true });
 
         // Unknown or missing item_id → log, acknowledge, do nothing. This endpoint
         // must NEVER fall back to syncing all users.
         if (payload.ItemId is null)
         {
-            _logger.LogWarning("Plaid TRANSACTIONS webhook had no item_id — ignored");
+            _logger.LogWarning("Plaid {Type} webhook had no item_id — ignored", payload.WebhookType);
             return Ok(new { received = true });
         }
 
@@ -223,7 +244,37 @@ public class PlaidController : ControllerBase
             return Ok(new { received = true });
         }
 
+        if (payload.WebhookType == "ITEM")
+        {
+            await HandleItemWebhookAsync(connection, payload);
+            return Ok(new { received = true });
+        }
+
         await _sync.SyncForUserAsync(connection.UserId);
         return Ok(new { received = true });
+    }
+
+    // Flags/unflags a connection for re-authentication based on ITEM webhook codes.
+    // needs_reauth drives the UI's update-mode "Reconnect" action; a successful sync also
+    // clears it (see TransactionSyncService), so this only has to set it and honor LOGIN_REPAIRED.
+    private async Task HandleItemWebhookAsync(PlaidConnection connection, WebhookPayload payload)
+    {
+        var needsReauth =
+            (payload.WebhookCode == "ERROR" && payload.Error?.ErrorCode == "ITEM_LOGIN_REQUIRED")
+            || payload.WebhookCode == "PENDING_EXPIRATION";
+
+        if (needsReauth && !connection.NeedsReauth)
+        {
+            connection.NeedsReauth = true;
+            await _db.SaveChangesAsync();
+            _logger.LogInformation(
+                "Item {ItemId} flagged needs_reauth ({Code})", payload.ItemId, payload.WebhookCode);
+        }
+        else if (payload.WebhookCode == "LOGIN_REPAIRED" && connection.NeedsReauth)
+        {
+            connection.NeedsReauth = false;
+            await _db.SaveChangesAsync();
+            _logger.LogInformation("Item {ItemId} re-auth cleared (LOGIN_REPAIRED)", payload.ItemId);
+        }
     }
 }

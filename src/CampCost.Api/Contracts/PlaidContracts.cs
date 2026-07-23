@@ -19,7 +19,20 @@ public record ExchangeRequest(
 
 public record WebhookPayload(
     [property: JsonPropertyName("webhook_type")] string? WebhookType,
-    [property: JsonPropertyName("item_id")] string? ItemId
+    [property: JsonPropertyName("webhook_code")] string? WebhookCode,
+    [property: JsonPropertyName("item_id")] string? ItemId,
+    [property: JsonPropertyName("error")] WebhookError? Error
+);
+
+// Nested `error` object on ITEM webhooks — only error_code is dispatched on.
+public record WebhookError(
+    [property: JsonPropertyName("error_code")] string? ErrorCode
+);
+
+// POST /api/plaid/update-link-token — identifies the connection to re-auth by its row id
+// (the only identifier the browser can read; item_id is withheld by RLS).
+public record UpdateLinkTokenRequest(
+    [property: JsonPropertyName("id")] Guid Id
 );
 
 // The browser identifies a connection by its row `id` (a GUID it can read) — never by item_id,

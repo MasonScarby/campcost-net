@@ -118,6 +118,22 @@ public class TransactionSyncServiceTests
         bool pending = false, string? pendingId = null, string merchant = "Shell") =>
         new(id, merchant, merchant, amount, Today.AddDays(-daysAgo), pending, pendingId);
 
+    // ── update-mode re-auth self-heal ─────────────────────────────────────────
+
+    [Fact]
+    public async Task SuccessfulSync_ClearsNeedsReauthFlag()
+    {
+        var connection = SeedConnection(cursor: "c0");
+        connection.NeedsReauth = true;   // flagged by an earlier ITEM_LOGIN_REQUIRED webhook
+        await _db.SaveChangesAsync();
+        SetupDelta(nextCursor: "c1");     // an empty but SUCCESSFUL sync
+
+        await _sut.SyncForUserAsync(_userId);
+
+        // Reaching a successful sync proves the Item re-authenticated — the flag self-heals.
+        _db.PlaidConnections.Single(c => c.Id == connection.Id).NeedsReauth.Should().BeFalse();
+    }
+
     // ── no active trips: still stores (no black hole) ─────────────────────────
 
     [Fact]
