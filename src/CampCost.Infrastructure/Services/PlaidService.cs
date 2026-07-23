@@ -45,6 +45,24 @@ public class PlaidService : IPlaidService
         return response.LinkToken;
     }
 
+    public async Task<string> CreateUpdateLinkTokenAsync(string userId, string accessToken)
+    {
+        // Update mode: pass the existing access_token and OMIT Products/Transactions. Link
+        // re-authenticates the SAME Item (same item_id, stable transaction_ids), so re-auth
+        // never creates a new Item — which is exactly what avoids the duplicate-transaction
+        // problem that a disconnect + reconnect produces.
+        var response = await _client.LinkTokenCreateAsync(new LinkTokenCreateRequest
+        {
+            User = new LinkTokenCreateRequestUser { ClientUserId = userId },
+            ClientName = "CampCost",
+            CountryCodes = new List<CountryCode> { CountryCode.Us },
+            Language = Language.English,
+            Webhook = string.IsNullOrEmpty(_webhookUrl) ? null : _webhookUrl,
+            AccessToken = accessToken
+        });
+        return response.LinkToken;
+    }
+
     public async Task<(string AccessToken, string ItemId)> ExchangePublicTokenAsync(string publicToken)
     {
         var response = await _client.ItemPublicTokenExchangeAsync(

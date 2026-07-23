@@ -20,5 +20,14 @@ public class PlaidConnection
     /// </summary>
     public string? SyncCursor { get; set; }
 
+    /// <summary>
+    /// Set true when Plaid signals the Item needs re-authentication (an ITEM webhook with
+    /// error_code ITEM_LOGIN_REQUIRED, or PENDING_EXPIRATION). The UI surfaces a "Reconnect"
+    /// action that opens Link in UPDATE mode — the SAME Item is re-authed, so item_id and
+    /// transaction_ids stay stable and no duplicate history is created (unlike disconnect +
+    /// reconnect, which mints a new Item). Cleared automatically on the next successful sync.
+    /// </summary>
+    public bool NeedsReauth { get; set; }
+
     public DateTime CreatedAt { get; set; }
 }

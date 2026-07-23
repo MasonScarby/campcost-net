@@ -150,6 +150,7 @@ public class CampCostDbContext : DbContext
             e.Property(p => p.InstitutionName).HasColumnName("institution_name");
             e.Property(p => p.LastSyncAt).HasColumnName("last_sync_at");
             e.Property(p => p.SyncCursor).HasColumnName("sync_cursor");
+            e.Property(p => p.NeedsReauth).HasColumnName("needs_reauth");
             e.Property(p => p.CreatedAt).HasColumnName("created_at");
         });
 
