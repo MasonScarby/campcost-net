@@ -138,6 +138,47 @@ public class AccountServiceTests
     }
 
     [Fact]
+    public async Task DisconnectById_removes_connection_and_invalidates_token()
+    {
+        var userA = Guid.NewGuid();
+        var (_, token) = SeedUser(userA, "a");
+        var connId = _db.PlaidConnections.Single(c => c.UserId == userA).Id;
+
+        var result = await Service().DisconnectBankByIdAsync(userA, connId);
+
+        result.Should().BeTrue();
+        _plaid.Verify(p => p.RemoveItemAsync(token), Times.Once);
+        _db.PlaidConnections.Any(c => c.UserId == userA).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task DisconnectById_returns_false_for_unknown_id()
+    {
+        var userA = Guid.NewGuid();
+        SeedUser(userA, "a");
+
+        (await Service().DisconnectBankByIdAsync(userA, Guid.NewGuid())).Should().BeFalse();
+        // No Plaid call, connection intact.
+        _plaid.Verify(p => p.RemoveItemAsync(It.IsAny<string>()), Times.Never);
+        _db.PlaidConnections.Any(c => c.UserId == userA).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task DisconnectById_cannot_touch_another_users_connection()
+    {
+        var userA = Guid.NewGuid();
+        var userB = Guid.NewGuid();
+        SeedUser(userA, "a");
+        SeedUser(userB, "b");
+        var connB = _db.PlaidConnections.Single(c => c.UserId == userB).Id;
+
+        // userA passes userB's connection id → scoped-out, nothing happens.
+        (await Service().DisconnectBankByIdAsync(userA, connB)).Should().BeFalse();
+        _plaid.Verify(p => p.RemoveItemAsync(It.IsAny<string>()), Times.Never);
+        _db.PlaidConnections.Any(c => c.UserId == userB).Should().BeTrue();
+    }
+
+    [Fact]
     public async Task ClearTransactions_deletes_all_txns_incl_soft_deleted_resets_cursor_keeps_rest()
     {
         var userA = Guid.NewGuid();

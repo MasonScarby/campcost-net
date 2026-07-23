@@ -22,6 +22,8 @@ public record WebhookPayload(
     [property: JsonPropertyName("item_id")] string? ItemId
 );
 
+// The browser identifies a connection by its row `id` (a GUID it can read) — never by item_id,
+// which RLS withholds from clients. The server maps id → connection (scoped to the JWT user).
 public record DisconnectRequest(
-    [property: JsonPropertyName("item_id")] string ItemId
+    [property: JsonPropertyName("id")] Guid Id
 );

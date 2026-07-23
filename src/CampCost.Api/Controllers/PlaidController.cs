@@ -149,20 +149,23 @@ public class PlaidController : ControllerBase
         return Ok(new { success = true, connections_reset = connections.Count });
     }
 
-    // POST /api/plaid/disconnect  { "item_id": "<plaid item id>" }
+    // POST /api/plaid/disconnect  { "id": "<connection row id>" }
     // Disconnects a linked bank: calls Plaid /item/remove to invalidate the access token, then
     // deletes the local connection (historical transactions are kept, just detached). Required
     // so a user can revoke bank access — and so we stop holding a live token we no longer need.
+    // Keyed off the connection row id (the only identifier the browser can read) + the JWT user,
+    // so a user can only disconnect their own bank. This MUST go through the API: a direct
+    // client-side delete cannot call Plaid /item/remove and is blocked by RLS anyway.
     [HttpPost("disconnect")]
     public async Task<IActionResult> Disconnect([FromBody] DisconnectRequest req)
     {
-        if (string.IsNullOrWhiteSpace(req.ItemId))
-            return BadRequest(new { error = "item_id is required" });
+        if (req.Id == Guid.Empty)
+            return BadRequest(new { error = "id is required" });
 
-        var ok = await _account.DisconnectBankAsync(UserId, req.ItemId);
+        var ok = await _account.DisconnectBankByIdAsync(UserId, req.Id);
         return ok
             ? Ok(new { success = true })
-            : NotFound(new { error = "No connected bank found with that item_id." });
+            : NotFound(new { error = "No connected bank found with that id." });
     }
 
     // POST /api/plaid/webhook
