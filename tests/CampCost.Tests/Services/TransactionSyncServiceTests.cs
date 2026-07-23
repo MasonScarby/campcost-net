@@ -401,4 +401,112 @@ public class TransactionSyncServiceTests
         var reviewed = await _db.Transactions.SingleAsync(t => t.PlaidTransactionId == "reviewed-1");
         reviewed.TripId.Should().BeNull("reviewed rows are user-confirmed and never auto-moved");
     }
+
+    // ── cross-reconnect dedup (disconnect → reconnect issues new Item + new IDs) ──
+
+    /// <summary>Seeds a DETACHED transaction (PlaidConnectionId == null) — the orphaned
+    /// history left behind when a bank is disconnected. Name == MerchantName == merchant so
+    /// it lines up with the Tx() delta helper's content.</summary>
+    private void SeedDetached(string plaidId, decimal amount, string merchant, int daysAgo,
+        Guid? tripId = null, bool reviewed = false)
+    {
+        _db.Transactions.Add(new Transaction
+        {
+            Id = Guid.NewGuid(),
+            UserId = _userId,
+            PlaidConnectionId = null, // detached: the disconnected bank's orphaned history
+            PlaidTransactionId = plaidId,
+            TripId = tripId,
+            Name = merchant,
+            MerchantName = merchant,
+            Amount = amount,
+            TransactionDate = Today.AddDays(-daysAgo),
+            Reviewed = reviewed,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        });
+        _db.SaveChanges();
+    }
+
+    [Fact]
+    public async Task Reconnect_ReclaimsOrphanedTwin_NoDuplicate_PreservesTripAndReview()
+    {
+        var trip = SeedTrip();
+        // Orphan from the OLD (disconnected) connection: assigned to a trip + user-reviewed.
+        SeedDetached("old-id", amount: 42m, merchant: "Shell", daysAgo: 1,
+            tripId: trip.Id, reviewed: true);
+
+        // Reconnect: a NEW connection re-imports the same purchase under a NEW Plaid ID.
+        var connection = SeedConnection(cursor: null);
+        SetupDelta(added: new[] { Tx("new-id", amount: 42m, daysAgo: 1, merchant: "Shell") });
+
+        await _sut.SyncForUserAsync(_userId);
+
+        // Exactly ONE row survives — no duplicate.
+        (await _db.Transactions.CountAsync()).Should().Be(1);
+        var row = await _db.Transactions.SingleAsync();
+        row.PlaidTransactionId.Should().Be("new-id", "orphan adopts the reconnect's Plaid ID");
+        row.PlaidConnectionId.Should().Be(connection.Id, "orphan is re-attached to the live connection");
+        row.TripId.Should().Be(trip.Id, "trip assignment is preserved across reconnect");
+        row.Reviewed.Should().BeTrue("user-confirmed review state is preserved");
+    }
+
+    [Fact]
+    public async Task SameDayMultiples_WithinOneConnection_AreNeverMerged()
+    {
+        var connection = SeedConnection(cursor: null);
+        // Two genuinely distinct purchases: same place, same day, same price, different IDs.
+        SetupDelta(added: new[]
+        {
+            Tx("coffee-1", amount: 6m, daysAgo: 1, merchant: "Coffee Hut"),
+            Tx("coffee-2", amount: 6m, daysAgo: 1, merchant: "Coffee Hut"),
+        });
+
+        await _sut.SyncForUserAsync(_userId);
+
+        // Both kept — reclaim only targets DETACHED rows, never same-connection siblings.
+        (await _db.Transactions.CountAsync()).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Reconnect_WithSameDayMultiples_ReclaimsCountForCount()
+    {
+        // Old connection had TWO identical same-day purchases (both real).
+        SeedDetached("old-1", amount: 6m, merchant: "Coffee Hut", daysAgo: 1);
+        SeedDetached("old-2", amount: 6m, merchant: "Coffee Hut", daysAgo: 1);
+
+        var connection = SeedConnection(cursor: null);
+        // Reconnect re-imports BOTH under new IDs.
+        SetupDelta(added: new[]
+        {
+            Tx("new-1", amount: 6m, daysAgo: 1, merchant: "Coffee Hut"),
+            Tx("new-2", amount: 6m, daysAgo: 1, merchant: "Coffee Hut"),
+        });
+
+        await _sut.SyncForUserAsync(_userId);
+
+        // Exactly TWO survive (not 4, not 1): each orphan reclaimed once, multiplicity intact.
+        (await _db.Transactions.CountAsync()).Should().Be(2);
+        (await _db.Transactions.Where(t => t.PlaidConnectionId == connection.Id).CountAsync())
+            .Should().Be(2, "both reclaimed rows now belong to the live connection");
+    }
+
+    [Fact]
+    public async Task Reconnect_ExtraNewPurchase_BeyondOrphans_InsertsNormally()
+    {
+        // One orphan, but the reconnect window has TWO same-content purchases (one is new).
+        SeedDetached("old-1", amount: 6m, merchant: "Coffee Hut", daysAgo: 1);
+
+        var connection = SeedConnection(cursor: null);
+        SetupDelta(added: new[]
+        {
+            Tx("new-1", amount: 6m, daysAgo: 1, merchant: "Coffee Hut"),
+            Tx("new-2", amount: 6m, daysAgo: 1, merchant: "Coffee Hut"),
+        });
+
+        await _sut.SyncForUserAsync(_userId);
+
+        // Orphan reclaimed once; the extra genuinely-new purchase inserts → TWO rows, no loss.
+        (await _db.Transactions.CountAsync()).Should().Be(2);
+    }
 }

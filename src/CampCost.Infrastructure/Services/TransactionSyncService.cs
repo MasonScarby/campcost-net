@@ -170,6 +170,26 @@ public class TransactionSyncService : ITransactionSyncService
                 .Where(t => t.UserId == connection.UserId)
                 .ToDictionaryAsync(t => t.PlaidTransactionId);
 
+            // Cross-reconnect dedup. When a bank is disconnected then reconnected, Plaid
+            // issues a NEW Item with BRAND-NEW transaction_ids for the same real purchases,
+            // so the plaid_transaction_id dedup above can't catch them. Detached rows
+            // (PlaidConnectionId == null) are the orphaned history of a disconnected bank;
+            // an incoming `added` transaction matching one by CONTENT is that same purchase
+            // re-imported — so we reclaim the orphan (adopt it into this connection, keeping
+            // its trip_id/reviewed) instead of inserting a duplicate.
+            // Scope is deliberately DETACHED-only: two ACTIVE connections are never merged,
+            // and same-day multiples within a live connection are never touched. Multiplicity
+            // is preserved by draining a per-content-key queue one orphan at a time.
+            var reclaimableDetached = new Dictionary<string, Queue<Transaction>>();
+            foreach (var row in existingByPlaidId.Values)
+            {
+                if (row.PlaidConnectionId is not null || row.DeletedAt is not null) continue;
+                var key = ContentKey(row.Amount, row.TransactionDate, row.Name, row.MerchantName);
+                if (!reclaimableDetached.TryGetValue(key, out var q))
+                    reclaimableDetached[key] = q = new Queue<Transaction>();
+                q.Enqueue(row);
+            }
+
             foreach (var tx in delta.Added)
             {
                 // Skip credits (money in) — Plaid: negative amount = credit
@@ -191,6 +211,22 @@ public class TransactionSyncService : ITransactionSyncService
 
                 // Dedup on plaid_transaction_id (includes soft-deleted rows)
                 if (existingByPlaidId.ContainsKey(tx.TransactionId)) { skipped++; continue; }
+
+                // Cross-reconnect reclaim (see reclaimableDetached above): if this looks like
+                // a disconnected bank's orphaned transaction re-imported under a new Item,
+                // adopt the orphan instead of inserting a twin. ApplyTransaction swaps its
+                // Plaid ID + refreshes fields but leaves trip_id/reviewed intact.
+                var contentKey = ContentKey(tx.Amount, tx.Date, tx.Name, tx.MerchantName);
+                if (reclaimableDetached.TryGetValue(contentKey, out var orphans) && orphans.Count > 0)
+                {
+                    var reclaimed = orphans.Dequeue();
+                    existingByPlaidId.Remove(reclaimed.PlaidTransactionId);
+                    reclaimed.PlaidConnectionId = connection.Id;
+                    ApplyTransaction(reclaimed, tx);
+                    existingByPlaidId[tx.TransactionId] = reclaimed;
+                    upserted++;
+                    continue;
+                }
 
                 // TODO(free-tier cap): FreePlanLimits.MaxAssignedTransactionsPerTrip (50) is
                 // enforced in TransactionAssignmentService (auto-assign + manual PATCH), but
@@ -302,4 +338,12 @@ public class TransactionSyncService : ITransactionSyncService
         row.Pending = tx.Pending;
         row.UpdatedAt = DateTime.UtcNow;
     }
+
+    /// <summary>
+    /// Content fingerprint for cross-reconnect dedup: the same real purchase yields the same
+    /// key even after Plaid re-issues a new transaction_id under a new Item. Merchant is
+    /// null-normalized so a null vs "" difference can't split a match.
+    /// </summary>
+    private static string ContentKey(decimal amount, DateOnly date, string? name, string? merchant)
+        => $"{amount}|{date:yyyy-MM-dd}|{name ?? string.Empty}|{merchant ?? string.Empty}";
 }
