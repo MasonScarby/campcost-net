@@ -55,6 +55,28 @@ public class AccountService : IAccountService
         return true;
     }
 
+    public async Task<bool> DisconnectBankByIdAsync(Guid userId, Guid connectionId)
+    {
+        // Look up by row id AND user id: the id comes from the browser, so scoping to the
+        // authenticated user is what stops one user disconnecting another's connection.
+        var connection = await _db.PlaidConnections
+            .FirstOrDefaultAsync(c => c.UserId == userId && c.Id == connectionId);
+        if (connection is null)
+            return false;
+
+        // Revoke the live token at Plaid before dropping the row (best-effort — see SafeRemove).
+        await SafeRemoveItemAsync(connection.AccessToken);
+
+        // Deleting the connection DETACHES its transactions but keeps them (migration 008 makes
+        // transactions.plaid_connection_id `on delete set null`). Spend history survives an unlink.
+        _db.PlaidConnections.Remove(connection);
+        await _db.SaveChangesAsync();
+
+        _logger.LogInformation(
+            "Disconnected bank connection {ConnectionId} for user {UserId}", connectionId, userId);
+        return true;
+    }
+
     public async Task<int> ClearTransactionsAsync(Guid userId)
     {
         // Hard-delete every transaction for this user, INCLUDING soft-deleted rows

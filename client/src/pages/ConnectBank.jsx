@@ -34,6 +34,7 @@ export default function ConnectBank() {
   const [syncResult, setSyncResult] = useState(null)
   const [confirmDisconnect, setConfirmDisconnect] = useState(null) // connection id
   const [disconnecting, setDisconnecting] = useState(false)
+  const [disconnectError, setDisconnectError] = useState(null)
   const [syncWarning, setSyncWarning] = useState(null)
   // How many days of history to pull on first connect. Must stay in sync with the server
   // whitelist (PlaidController.AllowedImportDays); the API re-validates and ignores anything else.
@@ -62,11 +63,28 @@ export default function ConnectBank() {
   }
 
   const disconnectConnection = async (connectionId) => {
+    // Must go through the API: it calls Plaid /item/remove to revoke the live access token, then
+    // deletes the row server-side (service role). A direct client delete is blocked by RLS AND
+    // leaves the Plaid token live — so never optimistically drop the row without a confirmed 2xx.
     setDisconnecting(true)
-    await supabase.from('plaid_connections').delete().eq('id', connectionId)
-    setConnections(prev => prev.filter(c => c.id !== connectionId))
-    setConfirmDisconnect(null)
-    setDisconnecting(false)
+    setDisconnectError(null)
+    try {
+      const res = await backendFetch('/api/plaid/disconnect', {
+        method: 'POST',
+        body: JSON.stringify({ id: connectionId }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `Server error ${res.status}`)
+      }
+      setConnections(prev => prev.filter(c => c.id !== connectionId))
+      setConfirmDisconnect(null)
+    } catch (err) {
+      setDisconnectError(
+        err.message === 'Failed to fetch' ? 'Backend is not running.' : err.message)
+    } finally {
+      setDisconnecting(false)
+    }
   }
 
   useEffect(() => {
@@ -271,6 +289,9 @@ export default function ConnectBank() {
                         {confirmDisconnect === primary.id ? (
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: 240 }}>
                             <span style={{ fontSize: 11, color: '#8a5a00' }}>Reconnecting the same bank can cause duplicates. Remove?</span>
+                            {disconnectError && (
+                              <span style={{ width: '100%', fontSize: 11, color: '#b91c1c' }}>{disconnectError}</span>
+                            )}
                             <button
                               onClick={() => disconnectConnection(primary.id)}
                               disabled={disconnecting}
@@ -279,7 +300,7 @@ export default function ConnectBank() {
                               {disconnecting ? '...' : 'Yes'}
                             </button>
                             <button
-                              onClick={() => setConfirmDisconnect(null)}
+                              onClick={() => { setConfirmDisconnect(null); setDisconnectError(null) }}
                               style={{ fontSize: 11, color: '#8b5e3c', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
                             >
                               Cancel
@@ -316,6 +337,9 @@ export default function ConnectBank() {
                         {confirmDisconnect === c.id ? (
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: 240 }}>
                             <span style={{ fontSize: 11, color: '#8a5a00' }}>Reconnecting the same bank can cause duplicates. Remove?</span>
+                            {disconnectError && (
+                              <span style={{ width: '100%', fontSize: 11, color: '#b91c1c' }}>{disconnectError}</span>
+                            )}
                             <button
                               onClick={() => disconnectConnection(c.id)}
                               disabled={disconnecting}
@@ -324,7 +348,7 @@ export default function ConnectBank() {
                               {disconnecting ? '...' : 'Yes'}
                             </button>
                             <button
-                              onClick={() => setConfirmDisconnect(null)}
+                              onClick={() => { setConfirmDisconnect(null); setDisconnectError(null) }}
                               style={{ fontSize: 11, color: '#8b5e3c', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
                             >
                               Cancel

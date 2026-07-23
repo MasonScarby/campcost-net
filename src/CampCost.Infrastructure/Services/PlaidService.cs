@@ -117,8 +117,8 @@ public class PlaidService : IPlaidService
             if (string.IsNullOrEmpty(t.TransactionId))
             {
                 _logger.LogWarning(
-                    "Skipping Plaid transaction with missing transaction_id (merchant: {Merchant}, date: {Date}) — no stable ID means no dedup",
-                    t.MerchantName, t.Date);
+                    "Skipping Plaid transaction with missing transaction_id (date: {Date}) — no stable ID means no dedup",
+                    t.Date);
                 continue;
             }
 
