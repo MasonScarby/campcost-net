@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using CampCost.Core.Entities;
 using CampCost.Core.Interfaces;
 using CampCost.Core.Services;
@@ -57,13 +58,34 @@ public class TransactionSyncService : ITransactionSyncService
         _logger = logger;
     }
 
-    public async Task<SyncResult> SyncForUserAsync(Guid userId)
+    // ── concurrency guard ─────────────────────────────────────────────────────
+    // Serialize syncs per user. Two Plaid webhooks for the same connection (or a webhook + a
+    // manual sync) can land within milliseconds. Each sync dedups by reading a snapshot of the
+    // existing transactions, THEN inserting the ones it deemed new — so two overlapping syncs
+    // both decide the same plaid_transaction_id is new and race to INSERT it. The loser hits
+    // the global unique constraint (23505) and 500s — observed in prod on a bank's initial
+    // webhook burst. Gating per user makes the second sync wait, then read the first's committed
+    // cursor + rows and skip correctly. In-process, so correct for a single always-on instance;
+    // if the API is ever scaled to multiple instances, swap this for a Postgres advisory lock
+    // (pg_advisory_xact_lock) keyed on the connection.
+    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> _userSyncLocks = new();
+
+    private static async Task<SyncResult> WithUserLock(Guid userId, Func<Task<SyncResult>> body)
     {
-        var connections = await _db.PlaidConnections
-            .Where(c => c.UserId == userId)
-            .ToListAsync();
-        return await SyncConnectionsAsync(connections);
+        var gate = _userSyncLocks.GetOrAdd(userId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync();
+        try { return await body(); }
+        finally { gate.Release(); }
     }
+
+    public Task<SyncResult> SyncForUserAsync(Guid userId) =>
+        WithUserLock(userId, async () =>
+        {
+            var connections = await _db.PlaidConnections
+                .Where(c => c.UserId == userId)
+                .ToListAsync();
+            return await SyncConnectionsAsync(connections);
+        });
 
     /// <summary>
     /// Trip-specific sync: runs the normal cursor sync (new transactions inside this
@@ -72,7 +94,10 @@ public class TransactionSyncService : ITransactionSyncService
     /// "transaction landed on the wrong trip / no trip" problem. Reviewed transactions
     /// are never moved (user-confirmed assignments are respected).
     /// </summary>
-    public async Task<SyncResult> SyncForTripAsync(Guid userId, Guid tripId)
+    public Task<SyncResult> SyncForTripAsync(Guid userId, Guid tripId) =>
+        WithUserLock(userId, () => SyncForTripCoreAsync(userId, tripId));
+
+    private async Task<SyncResult> SyncForTripCoreAsync(Guid userId, Guid tripId)
     {
         var connections = await _db.PlaidConnections
             .Where(c => c.UserId == userId)

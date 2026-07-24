@@ -525,4 +525,65 @@ public class TransactionSyncServiceTests
         // Orphan reclaimed once; the extra genuinely-new purchase inserts → TWO rows, no loss.
         (await _db.Transactions.CountAsync()).Should().Be(2);
     }
+
+    // ── concurrent-sync race (prod: duplicate key 23505 on a bank's webhook burst) ──
+
+    [Fact]
+    public async Task ConcurrentSyncs_SameUser_ProduceOneRow_AndDoNotThrow()
+    {
+        // Two Plaid webhooks for the same connection arriving together used to race the
+        // read-then-insert dedup: both read an empty snapshot, both INSERT the same
+        // plaid_transaction_id, and the loser hit the unique constraint (23505) → 500.
+        // Per-user serialization must make the second sync observe the first's insert and
+        // skip it — exactly one row, no exception. Each "webhook" gets its OWN DbContext
+        // (like a real request), both pointed at one shared in-memory store.
+        var userId = Guid.NewGuid();
+        var dbName = $"campcost-concurrent-{Guid.NewGuid()}";
+
+        CampCostDbContext NewCtx() => new(new DbContextOptionsBuilder<CampCostDbContext>()
+            .UseInMemoryDatabase(dbName).Options);
+
+        using (var seed = NewCtx())
+        {
+            seed.PlaidConnections.Add(new PlaidConnection
+            {
+                Id = Guid.NewGuid(), UserId = userId, AccessToken = "access-token",
+                ItemId = "item-1", InstitutionName = "Test Bank", CreatedAt = DateTime.UtcNow
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        // Plaid returns the SAME added transaction for every call, with a delay wide enough
+        // that two UN-serialized syncs would both read an empty table before either writes.
+        static IPlaidService PlaidReturningRaceTx()
+        {
+            var m = new Mock<IPlaidService>();
+            m.Setup(p => p.SyncTransactionsAsync(It.IsAny<string>(), It.IsAny<string?>()))
+                .Returns(async () =>
+                {
+                    await Task.Delay(50);
+                    return new PlaidSyncDelta(
+                        new[] { Tx("race-tx") }, Array.Empty<PlaidTransaction>(),
+                        Array.Empty<string>(), "cursor-next");
+                });
+            return m.Object;
+        }
+
+        TransactionSyncService Svc(CampCostDbContext db) => new(
+            db, PlaidReturningRaceTx(), new TransactionCategorizationService(),
+            new TransactionMatchingService(), NullLogger<TransactionSyncService>.Instance);
+
+        using var dbA = NewCtx();
+        using var dbB = NewCtx();
+
+        Func<Task> fireBothWebhooks = () => Task.WhenAll(
+            Svc(dbA).SyncForUserAsync(userId),
+            Svc(dbB).SyncForUserAsync(userId));
+
+        await fireBothWebhooks.Should().NotThrowAsync();
+
+        using var verify = NewCtx();
+        (await verify.Transactions.CountAsync())
+            .Should().Be(1, "the second sync must observe the first's insert and skip it");
+    }
 }
