@@ -1,9 +1,9 @@
 import { Link } from 'react-router-dom'
 
-// Public (unauthenticated) route — see PrivacyPolicy.jsx for why. DRAFT tailored to
-// CampCost; governing-law and entity details are placeholders Mason must set, and the
-// whole document should get a legal pass before Plaid production.
-const LAST_UPDATED = 'July 13, 2026'
+// Public (unauthenticated) route (see PrivacyPolicy.jsx for why). Self-drafted and
+// tailored to CampCost; governing law is set to Pennsylvania. Still not lawyer-reviewed;
+// get a legal pass before pushing growth.
+const LAST_UPDATED = 'July 24, 2026'
 
 const page = { maxWidth: 760, margin: '0 auto', padding: '40px 24px 80px', color: '#4a3f35', lineHeight: 1.65 }
 const h1 = { fontSize: 30, color: '#5a3d28', marginBottom: 4 }
@@ -83,7 +83,7 @@ export default function Terms() {
 
       <h2 style={h2}>11. Governing law</h2>
       <p>
-        These Terms are governed by the laws of the State of <strong>[STATE — set before launch]</strong>,
+        These Terms are governed by the laws of the Commonwealth of <strong>Pennsylvania</strong>,
         without regard to its conflict-of-laws rules.
       </p>
 
