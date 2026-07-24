@@ -2,12 +2,27 @@ using System.Security.Claims;
 using System.Threading.RateLimiting;
 using CampCost.Api.Middleware;
 using CampCost.Infrastructure;
+using CampCost.Infrastructure.Data;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// --- Sentry error monitoring ---
+// No-op when Sentry:Dsn is unset (local dev) — so nothing changes locally. In prod, set
+// Sentry__Dsn in Railway. SendDefaultPii=false + default request-body capture off means bank
+// data / transaction payloads / tokens are never attached to events. Errors only, no perf traces.
+builder.WebHost.UseSentry(o =>
+{
+    o.Dsn = builder.Configuration["Sentry:Dsn"] ?? string.Empty;
+    o.Environment = builder.Environment.EnvironmentName;
+    o.SendDefaultPii = false;
+    o.TracesSampleRate = 0;
+    o.MinimumEventLevel = Microsoft.Extensions.Logging.LogLevel.Error;
+});
 
 // --- Infrastructure: DB + Plaid + all scoped services ---
 builder.Services.AddInfrastructure(builder.Configuration);
@@ -134,6 +149,15 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapControllers();
+
+// Liveness — is the process up? (cheap, no dependencies)
 app.MapGet("/", () => Results.Ok(new { status = "ok" }));
+
+// Readiness — is the process AND its database reachable? Point UptimeRobot here so a DB outage
+// pages you instead of the app looking "up". Returns 503 when the DB can't be reached.
+app.MapGet("/health", async (CampCostDbContext db) =>
+    await db.Database.CanConnectAsync()
+        ? Results.Ok(new { status = "healthy" })
+        : Results.StatusCode(StatusCodes.Status503ServiceUnavailable));
 
 app.Run();

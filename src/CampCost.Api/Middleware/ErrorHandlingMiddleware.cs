@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using Sentry;
 
 namespace CampCost.Api.Middleware;
 
@@ -27,6 +28,10 @@ public class ErrorHandlingMiddleware
         }
         catch (Exception ex)
         {
+            // This middleware swallows the exception to shape the JSON response, so Sentry's
+            // automatic capture (which needs the exception to propagate out of the pipeline)
+            // would never see it — capture it explicitly here. No-op if Sentry has no DSN.
+            SentrySdk.CaptureException(ex);
             _logger.LogError(ex, "Unhandled exception");
             var detail = context.RequestServices
                 .GetRequiredService<IHostEnvironment>().IsDevelopment()
