@@ -17,7 +17,7 @@ export default function PrivacyPolicy() {
       <p style={muted}>Last updated: {LAST_UPDATED}</p>
 
       <p style={{ marginTop: 20 }}>
-        CampCost ("we", "us") helps you track trip spending by connecting your bank
+        CampCost helps you track trip spending by connecting your bank
         accounts and organizing transactions into trips and budgets. This policy explains
         what we collect, how we use it, and the choices you have. By using CampCost you
         agree to this policy and to our <Link to="/terms" style={{ color: '#8b5e3c' }}>Terms of Service</Link>.
