@@ -2,9 +2,8 @@ import { Link } from 'react-router-dom'
 
 // Public (unauthenticated) route. Plaid production access and app-store review both
 // require a publicly reachable privacy policy URL, so this must NOT sit behind
-// ProtectedRoute. Content is a DRAFT tailored to CampCost's actual data flow
-// (Plaid + Supabase) — have it reviewed by counsel before enabling Plaid production.
-const LAST_UPDATED = 'July 13, 2026'
+// ProtectedRoute. Content is tailored to CampCost's actual data flow (Plaid + Supabase).
+const LAST_UPDATED = 'July 24, 2026'
 
 const page = { maxWidth: 760, margin: '0 auto', padding: '40px 24px 80px', color: '#4a3f35', lineHeight: 1.65 }
 const h1 = { fontSize: 30, color: '#5a3d28', marginBottom: 4 }
@@ -29,7 +28,7 @@ export default function PrivacyPolicy() {
         <li><strong>Account information</strong> — the email address you sign up with. Authentication is handled by Supabase; we never see or store your password.</li>
         <li><strong>Financial data (via Plaid)</strong> — when you connect a bank, our partner Plaid securely retrieves your transactions and account details (names, balances, transaction amounts, dates, and merchant/category data). <strong>Your bank login credentials go directly to Plaid — CampCost never sees or stores them.</strong></li>
         <li><strong>Data you enter</strong> — trips, destinations, dates, budgets, manual expenses, and category corrections.</li>
-        <li><strong>Technical data</strong> — basic security and diagnostic logs (e.g. request timing, error events). We do not use third-party advertising or analytics trackers.</li>
+        <li><strong>Usage &amp; technical data</strong> — basic security and diagnostic logs (e.g. request timing, error events), plus aggregate usage analytics through Google Analytics (page views and general interactions), which sets cookies to measure this. We do not use advertising trackers, and we never send Google any personal or financial information.</li>
       </ul>
 
       <h2 style={h2}>How we use your information</h2>
@@ -60,9 +59,10 @@ export default function PrivacyPolicy() {
       <h2 style={h2}>Data sharing</h2>
       <p>
         We share data only with the service providers that make CampCost work — Plaid
-        (bank connectivity), Supabase (database &amp; authentication), and our payment
-        processor for subscriptions — and only as needed to provide the service. We may
-        also disclose information if required by law.
+        (bank connectivity), Supabase (database &amp; authentication), Google Analytics
+        (aggregate, non-identifying usage measurement), and our payment processor for
+        subscriptions — and only as needed to provide the service. We may also disclose
+        information if required by law.
       </p>
 
       <h2 style={h2}>Your rights &amp; choices</h2>
