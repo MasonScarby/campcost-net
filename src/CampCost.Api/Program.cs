@@ -155,7 +155,9 @@ app.MapGet("/", () => Results.Ok(new { status = "ok" }));
 
 // Readiness — is the process AND its database reachable? Point UptimeRobot here so a DB outage
 // pages you instead of the app looking "up". Returns 503 when the DB can't be reached.
-app.MapGet("/health", async (CampCostDbContext db) =>
+// GET + HEAD: uptime monitors (UptimeRobot et al.) probe with HEAD by default — a GET-only route
+// answers HEAD with 405, which reads as "down". HEAD runs the check and returns status-only.
+app.MapMethods("/health", new[] { "GET", "HEAD" }, async (CampCostDbContext db) =>
     await db.Database.CanConnectAsync()
         ? Results.Ok(new { status = "healthy" })
         : Results.StatusCode(StatusCodes.Status503ServiceUnavailable));
