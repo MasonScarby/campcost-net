@@ -1,8 +1,7 @@
 import { Link } from 'react-router-dom'
 
-// Public (unauthenticated) route (see PrivacyPolicy.jsx for why). Self-drafted and
-// tailored to CampCost; governing law is set to Pennsylvania. Still not lawyer-reviewed;
-// get a legal pass before pushing growth.
+// Public (unauthenticated) route (see PrivacyPolicy.jsx for why). Tailored to
+// CampCost's data flow; governing law is set to Pennsylvania.
 const LAST_UPDATED = 'July 24, 2026'
 
 const page = { maxWidth: 760, margin: '0 auto', padding: '40px 24px 80px', color: '#4a3f35', lineHeight: 1.65 }
