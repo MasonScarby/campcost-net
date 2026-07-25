@@ -30,12 +30,22 @@ export default function Login() {
     e.preventDefault()
     setError('')
     setLoading(true)
-    const { error } = isSignUp
+    const { data, error } = isSignUp
       ? await signUp(email, password)
       : await signIn(email, password)
     if (error) {
       setLoading(false)
       setError(error.message)
+      return
+    }
+
+    // Email confirmation required: signUp returns a user but no session until the
+    // link is clicked. Don't route to the dashboard (no session yet) — and this
+    // same "check your inbox" message is what Supabase returns for an already-
+    // registered email, so it doubles as enumeration-safe.
+    if (isSignUp && !data.session) {
+      setLoading(false)
+      setNotice(`Almost there. We sent a confirmation link to ${email}. Click it to activate your account, then sign in.`)
       return
     }
 
