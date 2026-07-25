@@ -24,7 +24,13 @@ export function AuthProvider({ children }) {
     supabase.auth.signInWithPassword({ email, password })
 
   const signUp = (email, password) =>
-    supabase.auth.signUp({ email, password })
+    supabase.auth.signUp({
+      email,
+      password,
+      // With "Confirm email" on, the confirmation link brings the user back here
+      // (already signed in) instead of dumping them on the Supabase Site URL.
+      options: { emailRedirectTo: `${window.location.origin}/dashboard` },
+    })
 
   const signInWithGoogle = () =>
     supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: `${window.location.origin}/dashboard` } })
