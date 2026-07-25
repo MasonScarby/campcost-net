@@ -140,6 +140,10 @@ app.UseAuthorization();
 // After UseAuthentication so the per-user policy can partition on the JWT subject.
 app.UseRateLimiter();
 
+// After UseAuthentication so the user's claims are available. Rejects writes from the
+// public demo account (Demo:UserId) so shared demo credentials can't be used to modify data.
+app.UseMiddleware<DemoReadOnlyMiddleware>();
+
 // Swagger is a development tool only — never expose the API surface (or the
 // paste-your-JWT UI) in production.
 if (app.Environment.IsDevelopment())
