@@ -133,6 +133,8 @@ builder.Services.AddSwaggerGen(c =>
 
 var app = builder.Build();
 
+// Outermost so the headers land on every response, including errors, 401s, and 429s.
+app.UseMiddleware<SecurityHeadersMiddleware>();
 app.UseMiddleware<ErrorHandlingMiddleware>();
 app.UseCors();
 app.UseAuthentication();
