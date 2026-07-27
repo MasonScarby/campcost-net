@@ -1,0 +1,57 @@
+# Serves the built Vite SPA on Railway with security response headers.
+# Adding this file switches the frontend service from Railway's default
+# static server to Caddy. Deploy from client/ with `railway up`.
+{
+	admin off
+	persist_config off
+	auto_https off
+	log {
+		format json
+	}
+	servers {
+		trusted_proxies static private_ranges 100.0.0.0/8
+	}
+}
+
+:{$PORT:3000} {
+	log {
+		format json
+	}
+
+	root * dist
+	encode zstd gzip
+
+	# Vite emits content-hashed files under /assets/* — safe to cache forever.
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
+	# --- Security headers (applied to every response) ---
+	header {
+		# Force HTTPS for 1 year. NOT preloaded and NOT includeSubDomains yet —
+		# stage up to `; includeSubDomains` once every *.campcost.net is HTTPS,
+		# then add `; preload` only if you intend to submit to the preload list
+		# (removal from it is slow and painful).
+		Strict-Transport-Security "max-age=31536000"
+		# Clickjacking protection (legacy + modern via CSP frame-ancestors below)
+		X-Frame-Options "DENY"
+		# Stop MIME sniffing
+		X-Content-Type-Options "nosniff"
+		# Don't leak full URLs cross-origin
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Lock down powerful browser features we don't use
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), browsing-topics=()"
+		# Content Security Policy — tuned to CampCost's integrations:
+		#   Plaid Link, Stripe Checkout, Supabase, Sentry, Google Analytics.
+		# 'unsafe-inline' on script-src is required by the inline gtag snippet
+		# in index.html; on style-src by Recharts/react-pdf inline styles.
+		# If a flow breaks after deploy, rename this header to
+		# `Content-Security-Policy-Report-Only` to unblock while you tune it.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.plaid.com https://js.stripe.com https://www.googletagmanager.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://www.googletagmanager.com https://*.google-analytics.com; font-src 'self' data:; connect-src 'self' https://campcost-net-production.up.railway.app https://api.campcost.net https://*.supabase.co wss://*.supabase.co https://*.plaid.com https://*.sentry.io https://*.ingest.sentry.io https://*.ingest.us.sentry.io https://*.google-analytics.com https://*.analytics.google.com https://www.googletagmanager.com; frame-src 'self' https://cdn.plaid.com https://*.plaid.com https://js.stripe.com https://checkout.stripe.com; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self' https://checkout.stripe.com; frame-ancestors 'none'; upgrade-insecure-requests"
+		# Hide the server banner
+		-Server
+	}
+
+	# SPA fallback: serve real files, else index.html for client-side routing
+	try_files {path} /index.html
+	file_server
+}
